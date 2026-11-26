@@ -1,0 +1,78 @@
+
+name: Extract Ryder Kraft APK
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apktool unzip zip curl jq
+
+      - name: Download APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "Ryder.Kraft.SA-MP.apk" \
+            --dir .
+
+      - name: Install JADX
+        run: |
+          URL=$(curl -fsSL \
+            https://api.github.com/repos/skylot/jadx/releases/latest \
+            | jq -r '.assets[] |
+            select(.name | test("^jadx-[0-9].*\\.zip$")) |
+            .browser_download_url' | head -n 1)
+
+          test -n "$URL"
+          curl -fL "$URL" -o jadx.zip
+          unzip -q jadx.zip -d jadx-tool
+
+          JADX=$(find jadx-tool -type f \
+            -path '*/bin/jadx' -print -quit)
+
+          chmod +x "$JADX"
+          echo "JADX=$JADX" >> "$GITHUB_ENV"
+
+      - name: Extract APKTool
+        run: |
+          mkdir -p output/apktool
+          apktool d -f "Ryder.Kraft.SA-MP.apk" \
+            -o output/apktool
+
+      - name: Extract JADX
+        run: |
+          mkdir -p output/jadx
+          "$JADX" -d output/jadx \
+            "Ryder.Kraft.SA-MP.apk"
+
+      - name: Save original APK
+        run: |
+          mkdir -p output/original
+          cp "Ryder.Kraft.SA-MP.apk" output/original/
+
+      - name: Create ZIP
+        run: |
+          echo "Decompiled APK project" > output/README.txt
+          zip -qr Ryder-Kraft-Source.zip output
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ryder-Kraft-Source
+          path: Ryder-Kraft-Source.zip
+          retention-days: 30
