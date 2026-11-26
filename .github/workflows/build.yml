@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag containing the SpeedLife source ZIP"
+        description: "Release tag"
         required: true
         default: "speedlife-source-v1.1"
 
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install Java 17
+      - name: Install Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -28,25 +28,18 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android Build Tools
+      - name: Install Build Tools
         run: |
           yes | sdkmanager --licenses >/dev/null
           sdkmanager --install \
             "platform-tools" \
             "build-tools;35.0.0"
 
-      - name: Check Android Tools
-        run: |
-          sdkmanager --version
-          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
-          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
-
       - name: Download SpeedLife Source
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.release.tag_name || inputs.tag }}"
-          test -n "$TAG"
 
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -54,26 +47,37 @@ jobs:
             --dir .
 
           unzip -t SpeedLife_Launcher_DirectConnect_Source_DIRECTCONNECT_FIXED.zip
+
           mkdir -p source
+
           unzip -q SpeedLife_Launcher_DirectConnect_Source_DIRECTCONNECT_FIXED.zip -d source
 
       - name: Check Source
         run: |
           test -f source/apktool/apktool.yml
           test -f source/apktool/AndroidManifest.xml
+
+          test -f source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
+
           grep -q 'speedlife.launcher.game' source/apktool/AndroidManifest.xml
+
+          grep -q '82.39.186.143' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
+
+          grep -q '7013' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
       - name: Install Apktool
         run: |
           curl -fL --retry 3 \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
+
           test -s apktool.jar
 
       - name: Build APK
         run: |
           java -jar apktool.jar b source/apktool \
             -o SpeedLife-unsigned.apk
+
           test -s SpeedLife-unsigned.apk
 
       - name: Align APK
@@ -83,36 +87,33 @@ jobs:
             SpeedLife-unsigned.apk \
             SpeedLife-aligned.apk
 
-      - name: Restore Signing Key
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Generate Temporary Signing Key
         run: |
-          test -n "$ANDROID_KEYSTORE_BASE64"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > speedlife-release.jks
-          test -s speedlife-release.jks
+          keytool -genkeypair \
+            -keystore speedlife.keystore \
+            -alias speedlife \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass temporary123 \
+            -keypass temporary123 \
+            -dname "CN=SpeedLife, OU=Android, O=SpeedLife, L=Tunis, S=Tunis, C=TN"
 
       - name: Sign APK
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          test -n "$ANDROID_KEYSTORE_PASSWORD"
-          test -n "$ANDROID_KEY_ALIAS"
-          test -n "$ANDROID_KEY_PASSWORD"
-
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-            --ks speedlife-release.jks \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" \
-            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
-            --key-pass env:ANDROID_KEY_PASSWORD \
+            --ks speedlife.keystore \
+            --ks-key-alias speedlife \
+            --ks-pass pass:temporary123 \
+            --key-pass pass:temporary123 \
             --out SpeedLife.apk \
             SpeedLife-aligned.apk
 
       - name: Verify APK
         run: |
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
-            verify --verbose --print-certs SpeedLife.apk
+            verify --verbose SpeedLife.apk
+
           test -s SpeedLife.apk
 
       - name: Upload APK Artifact
