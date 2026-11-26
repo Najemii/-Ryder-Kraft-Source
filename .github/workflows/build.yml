@@ -1,9 +1,15 @@
 
-name: Extract APK Source
+name: Extract Ryder Kraft APK
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag
+        required: true
+        default: apk_v1
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install tools
@@ -21,80 +27,68 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apktool unzip zip jq
 
-      - name: Download APK from Release
+      - name: Download APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$GITHUB_REF_NAME" \
+          mkdir -p input extracted
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+
+          gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "Ryder Kraft SA-MP.apk" \
-            --dir .
+            --pattern "*.apk" \
+            --dir input
+
+          APK=$(find input -maxdepth 1 -type f -iname "*.apk" -print -quit)
+          test -n "$APK" || {
+            echo "APK file not found!"
+            exit 1
+          }
+
+          echo "APK=$APK" >> "$GITHUB_ENV"
 
       - name: Install JADX
         run: |
           URL=$(curl -fsSL \
             https://api.github.com/repos/skylot/jadx/releases/latest \
             | jq -r '.assets[] |
-              select(.name | test("^jadx-[0-9].*\\.zip$")) |
-              .browser_download_url' | head -n 1)
+            select(.name | test("^jadx-[0-9].*\\.zip$")) |
+            .browser_download_url' | head -n 1)
 
           test -n "$URL"
-          curl -fL "$URL" -o "$RUNNER_TEMP/jadx.zip"
-          mkdir -p "$RUNNER_TEMP/jadx"
-          unzip -q "$RUNNER_TEMP/jadx.zip" \
-            -d "$RUNNER_TEMP/jadx"
+          curl -fL "$URL" -o jadx.zip
+          mkdir jadx
+          unzip -q jadx.zip -d jadx
 
-          JADX=$(find "$RUNNER_TEMP/jadx" \
-            -type f -path '*/bin/jadx' -print -quit)
-
+          JADX=$(find jadx -type f -path "*/bin/jadx" -print -quit)
           chmod +x "$JADX"
           echo "JADX=$JADX" >> "$GITHUB_ENV"
 
-      - name: Prepare output
+      - name: Decode APK
         run: |
           mkdir -p extracted/apktool
+          apktool d -f "$APK" -o extracted/apktool
+
+      - name: Decompile Java
+        run: |
           mkdir -p extracted/jadx
+          "$JADX" --show-bad-code \
+            -d extracted/jadx "$APK"
+
+      - name: Copy original APK
+        run: |
           mkdir -p extracted/original
+          cp "$APK" extracted/original/
 
-          cp "Ryder Kraft SA-MP.apk" \
-            extracted/original/
-
-      - name: Decode APK with APKTool
+      - name: Create ZIP
         run: |
-          apktool d -f \
-            "Ryder Kraft SA-MP.apk" \
-            -o extracted/apktool
-
-      - name: Extract Java source with JADX
-        run: |
-          "$JADX" \
-            --show-bad-code \
-            -d extracted/jadx \
-            "Ryder Kraft SA-MP.apk"
-
-      - name: Create source ZIP
-        run: |
-          cat > extracted/README.txt <<'EOF'
-          Ryder Kraft APK Extraction
-
-          apktool:
-          Decoded Android resources, manifest and Smali code.
-
-          jadx:
-          Decompiled Java source code.
-
-          original:
-          Original APK file.
-
-          Note:
-          This is a decompiled project, not the original
-          Android Studio project.
-          Native libraries remain binary files.
-          EOF
-
           zip -qr Ryder-Kraft-Source.zip extracted
 
-      - name: Upload extracted project
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Ryder-Kraft-Source
