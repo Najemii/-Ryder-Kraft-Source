@@ -47,16 +47,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Searching for release: $TAG"
+          echo "Searching release: $TAG"
 
-          if ! RELEASE_JSON=$(gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"); then
-            echo "Release not found: $TAG"
-            echo "Available releases:"
-            gh api "repos/$GITHUB_REPOSITORY/releases" \
-              --jq '.[].tag_name' || true
-            exit 1
-          fi
+          RELEASE_JSON=$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
 
           ASSET_ID=$(echo "$RELEASE_JSON" | jq -r '
             [.assets[] |
@@ -64,8 +58,7 @@ jobs:
           ')
 
           if [ -z "$ASSET_ID" ]; then
-            echo "Source ZIP not found in release!"
-            echo "Available assets:"
+            echo "Source ZIP not found!"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
@@ -77,7 +70,6 @@ jobs:
             -o SpeedLife_Full_Modified_Source.zip
 
           test -s SpeedLife_Full_Modified_Source.zip
-
           unzip -t SpeedLife_Full_Modified_Source.zip
 
           mkdir -p source
@@ -118,8 +110,49 @@ jobs:
 
           echo "Project validation successful."
 
+      - name: Fix Settings Layout Attribute
+        run: |
+          set -euo pipefail
+
+          FILE="$APKTOOL_DIR/res/layout/fragment_settings_page.xml"
+
+          test -f "$FILE"
+
+          python3 - "$FILE" <<'PY'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          updated, count = re.subn(
+              r'(\bboxBackgroundMode\s*=\s*["\'])outlined(["\'])',
+              r'\1outline\2',
+              content
+          )
+
+          if count:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(updated)
+
+              print(f"Fixed {count} invalid attribute(s).")
+
+          elif re.search(
+              r'\bboxBackgroundMode\s*=\s*["\']outline["\']',
+              content
+          ):
+              print("Attribute already correct.")
+
+          else:
+              print("No outlined value found; checking other resources.")
+          PY
+
       - name: Fix duplicate resource IDs
         run: |
+          set -euo pipefail
+
           python3 - "$APKTOOL_DIR/res/values/public.xml" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
@@ -143,6 +176,7 @@ jobs:
                   seen[rid] = item.get("name")
 
           ET.indent(tree, space="    ")
+
           tree.write(
               path,
               encoding="utf-8",
@@ -154,6 +188,8 @@ jobs:
 
       - name: Verify resource IDs
         run: |
+          set -euo pipefail
+
           python3 - "$APKTOOL_DIR/res/values/public.xml" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
@@ -166,7 +202,10 @@ jobs:
 
               if rid:
                   if rid in ids:
-                      raise SystemExit("Duplicate ID remains: " + rid)
+                      raise SystemExit(
+                          "Duplicate ID remains: " + rid
+                      )
+
                   ids.add(rid)
 
           print("Resource IDs verified.")
@@ -283,10 +322,9 @@ jobs:
           retention-days: 14
 
       - name: Attach APK to Release
-        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
 
