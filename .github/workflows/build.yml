@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag"
+        description: "Release tag containing source ZIP"
         required: true
-        default: "speedlife-source-v1.1"
+        default: "v1.1"
 
 permissions:
   contents: write
@@ -43,13 +43,15 @@ jobs:
         run: |
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "SpeedLife_Launcher_DirectConnect_Source_DIRECTCONNECT_FIXED.zip" \
+            --pattern "SpeedLife_Launcher_Settings_Redesign.zip" \
             --dir .
 
-          unzip -t SpeedLife_Launcher_DirectConnect_Source_DIRECTCONNECT_FIXED.zip
+          test -s SpeedLife_Launcher_Settings_Redesign.zip
+
+          unzip -t SpeedLife_Launcher_Settings_Redesign.zip
 
           mkdir -p source
-          unzip -q SpeedLife_Launcher_DirectConnect_Source_DIRECTCONNECT_FIXED.zip -d source
+          unzip -q SpeedLife_Launcher_Settings_Redesign.zip -d source
 
       - name: Check Source
         run: |
@@ -58,11 +60,11 @@ jobs:
 
           test -f source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
-          grep -q 'speedlife.launcher.game' source/apktool/AndroidManifest.xml
+          grep -Fq 'speedlife.launcher.game' source/apktool/AndroidManifest.xml
 
-          grep -q '82.39.186.143' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
+          grep -Fq '82.39.186.143' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
-          grep -q '7013' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
+          grep -Fq '7013' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
       - name: Install Apktool
         run: |
