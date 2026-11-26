@@ -9,7 +9,7 @@ on:
       tag:
         description: "Release tag containing the modified source ZIP"
         required: true
-        default: "v3"
+        default: "vv3"
 
 permissions:
   contents: write
