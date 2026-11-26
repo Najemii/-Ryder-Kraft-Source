@@ -34,7 +34,7 @@ jobs:
 
       - name: Install Android Build Tools
         run: |
-          set -e
+          set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install \
             "platform-tools" \
@@ -54,11 +54,12 @@ jobs:
 
           ASSET_ID=$(echo "$RELEASE_JSON" | jq -r '
             [.assets[] |
-            select(.name == "SpeedLife_Full_Modified_Source.zip")][0].id // empty
+            select(.name == "SpeedLife_Launcher_Beta_Source.zip")][0].id // empty
           ')
 
           if [ -z "$ASSET_ID" ]; then
             echo "Source ZIP not found!"
+            echo "Available assets:"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
@@ -67,13 +68,13 @@ jobs:
             -H "Accept: application/octet-stream" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
-            -o SpeedLife_Full_Modified_Source.zip
+            -o SpeedLife_Launcher_Beta_Source.zip
 
-          test -s SpeedLife_Full_Modified_Source.zip
-          unzip -t SpeedLife_Full_Modified_Source.zip
+          test -s SpeedLife_Launcher_Beta_Source.zip
+          unzip -t SpeedLife_Launcher_Beta_Source.zip
 
           mkdir -p source
-          unzip -q SpeedLife_Full_Modified_Source.zip -d source
+          unzip -q SpeedLife_Launcher_Beta_Source.zip -d source
 
           echo "Source downloaded successfully."
 
@@ -116,9 +117,8 @@ jobs:
 
           FILE="$APKTOOL_DIR/res/layout/fragment_settings_page.xml"
 
-          test -f "$FILE"
-
-          python3 - "$FILE" <<'PY'
+          if [ -f "$FILE" ]; then
+            python3 - "$FILE" <<'PY'
           import sys
           import re
 
@@ -138,16 +138,12 @@ jobs:
                   f.write(updated)
 
               print(f"Fixed {count} invalid attribute(s).")
-
-          elif re.search(
-              r'\bboxBackgroundMode\s*=\s*["\']outline["\']',
-              content
-          ):
-              print("Attribute already correct.")
-
           else:
-              print("No outlined value found; checking other resources.")
+              print("No invalid outlined attribute found.")
           PY
+          else
+            echo "Settings layout file not found; skipping."
+          fi
 
       - name: Fix duplicate resource IDs
         run: |
