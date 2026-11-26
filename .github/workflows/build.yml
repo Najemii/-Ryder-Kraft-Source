@@ -1,5 +1,5 @@
 
-name: Build SpeedLife APK
+name: Build SpeedLife Lancher APK
 
 on:
   release:
@@ -10,7 +10,7 @@ on:
       tag:
         description: "Release tag containing source ZIP"
         required: true
-        default: "v3"
+        default: "vv3"
 
 permissions:
   contents: write
@@ -34,8 +34,8 @@ jobs:
 
       - name: Install Android Build Tools
         run: |
+          set -e
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
           sdkmanager --install \
             "platform-tools" \
             "build-tools;35.0.0"
@@ -47,20 +47,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Searching release: $TAG"
+          echo "Searching for release: $TAG"
 
-          RELEASE_JSON=$(gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          if ! RELEASE_JSON=$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"); then
+            echo "Release not found: $TAG"
+            echo "Available releases:"
+            gh api "repos/$GITHUB_REPOSITORY/releases" \
+              --jq '.[].tag_name' || true
+            exit 1
+          fi
 
           ASSET_ID=$(echo "$RELEASE_JSON" | jq -r '
             [.assets[] |
-            select((.name | ascii_downcase) ==
-            "speedlife_full_modified_source.zip")][0].id // empty
+            select(.name == "SpeedLife_Full_Modified_Source.zip")][0].id // empty
           ')
 
           if [ -z "$ASSET_ID" ]; then
-            echo "Source ZIP not found!"
-            echo "Available release assets:"
+            echo "Source ZIP not found in release!"
+            echo "Available assets:"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
@@ -76,10 +81,9 @@ jobs:
           unzip -t SpeedLife_Full_Modified_Source.zip
 
           mkdir -p source
-
           unzip -q SpeedLife_Full_Modified_Source.zip -d source
 
-          echo "Source ZIP downloaded successfully."
+          echo "Source downloaded successfully."
 
       - name: Locate and validate project
         run: |
@@ -95,7 +99,6 @@ jobs:
           fi
 
           APKTOOL_DIR="$(dirname "${FILES[0]}")"
-
           echo "APKTOOL_DIR=$APKTOOL_DIR" >> "$GITHUB_ENV"
 
           test -f "$APKTOOL_DIR/AndroidManifest.xml"
@@ -122,7 +125,6 @@ jobs:
           import xml.etree.ElementTree as ET
 
           path = sys.argv[1]
-
           tree = ET.parse(path)
           root = tree.getroot()
 
@@ -141,7 +143,6 @@ jobs:
                   seen[rid] = item.get("name")
 
           ET.indent(tree, space="    ")
-
           tree.write(
               path,
               encoding="utf-8",
@@ -158,7 +159,6 @@ jobs:
           import xml.etree.ElementTree as ET
 
           root = ET.parse(sys.argv[1]).getroot()
-
           ids = set()
 
           for item in root.findall("public"):
@@ -166,10 +166,7 @@ jobs:
 
               if rid:
                   if rid in ids:
-                      raise SystemExit(
-                          "Duplicate ID remains: " + rid
-                      )
-
+                      raise SystemExit("Duplicate ID remains: " + rid)
                   ids.add(rid)
 
           print("Resource IDs verified.")
@@ -184,7 +181,6 @@ jobs:
             -o apktool.jar
 
           test -s apktool.jar
-
           java -jar apktool.jar --version
 
       - name: Build APK
@@ -299,4 +295,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-          echo "APK uploaded to Release successfully."
+          echo "APK uploaded successfully."
