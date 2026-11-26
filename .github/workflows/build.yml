@@ -34,6 +34,11 @@ jobs:
             "platform-tools" \
             "build-tools;35.0.0"
 
+      - name: Check Android Tools
+        run: |
+          sdkmanager --version
+          test -f "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+
       - name: Download SpeedLife Source
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,7 +56,7 @@ jobs:
       - name: Check Source
         run: |
           test -f source/apktool/apktool.yml
-          grep -q 'package="speedlife.launcher.game"' source/apktool/AndroidManifest.xml
+          grep -q 'speedlife.launcher.game' source/apktool/AndroidManifest.xml
 
       - name: Install Apktool
         run: |
@@ -68,13 +73,18 @@ jobs:
 
           test -s SpeedLife-unsigned.apk
 
-      - name: Restore Signing Key
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Generate Signing Key
         run: |
-          test -n "$KEYSTORE_BASE64"
-          echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
-          test -s speedlife.keystore
+          keytool -genkeypair \
+            -v \
+            -keystore speedlife.keystore \
+            -alias speedlife \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass speedlife123 \
+            -keypass speedlife123 \
+            -dname "CN=SpeedLife, OU=Android, O=SpeedLife, L=Tunis, S=Tunis, C=TN"
 
       - name: Align APK
         run: |
@@ -84,16 +94,12 @@ jobs:
             SpeedLife-aligned.apk
 
       - name: Sign APK
-        env:
-          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
             --ks speedlife.keystore \
-            --ks-key-alias "$KS_ALIAS" \
-            --ks-pass env:KS_PASS \
-            --key-pass env:KEY_PASS \
+            --ks-key-alias speedlife \
+            --ks-pass pass:speedlife123 \
+            --key-pass pass:speedlife123 \
             --out SpeedLife.apk \
             SpeedLife-aligned.apk
 
@@ -101,6 +107,8 @@ jobs:
         run: |
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
             verify --verbose SpeedLife.apk
+
+          test -s SpeedLife.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
