@@ -23,9 +23,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install build tools
-        run: sdkmanager "build-tools;35.0.0"
+        with:
+          packages: 'build-tools;35.0.0'
+          accept-android-sdk-licenses: true
 
       - name: Download source from Release
         env:
@@ -36,7 +36,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern "SpeedLife_modified_source.zip" \
             --dir source
-
           test -f source/SpeedLife_modified_source.zip
 
       - name: Extract source
@@ -55,7 +54,6 @@ jobs:
         run: |
           java -jar apktool.jar b source/apktool \
             -o SpeedLife-unsigned.apk
-
           test -s SpeedLife-unsigned.apk
 
       - name: Align APK
@@ -87,7 +85,6 @@ jobs:
         run: |
           $ANDROID_HOME/build-tools/35.0.0/apksigner verify \
             --verbose --print-certs SpeedLife.apk
-
           test -s SpeedLife.apk
 
       - name: Upload APK
