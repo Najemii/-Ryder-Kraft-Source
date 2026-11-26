@@ -20,14 +20,24 @@ jobs:
 
     steps:
       - name: Install Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
       - name: Install Android Build Tools
         run: |
-          sdkmanager "platform-tools" "build-tools;35.0.0"
+          sdkmanager --install \
+            "platform-tools" \
+            "build-tools;35.0.0"
+
+      - name: Check Android Tools
+        run: |
+          sdkmanager --version
+          ls "$ANDROID_HOME/build-tools/35.0.0/"
 
       - name: Download Source ZIP from Release
         env:
@@ -35,25 +45,33 @@ jobs:
         run: |
           TAG="${{ github.event.release.tag_name || inputs.tag }}"
           mkdir -p source
+
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "SpeedLife_Launcher_DirectConnect_Source.zip" \
             --dir source
 
+          test -f source/SpeedLife_Launcher_DirectConnect_Source.zip
+
       - name: Extract Source
         run: |
-          unzip source/SpeedLife_Launcher_DirectConnect_Source.zip -d source
+          unzip -o source/SpeedLife_Launcher_DirectConnect_Source.zip -d source
+          test -f source/apktool/apktool.yml
 
       - name: Install Apktool
         run: |
-          curl -L \
+          curl -fL \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
+
+          test -s apktool.jar
 
       - name: Build APK
         run: |
           java -jar apktool.jar b source/apktool \
             -o SpeedLife-unsigned.apk
+
+          test -s SpeedLife-unsigned.apk
 
       - name: Generate Signing Key
         run: |
@@ -70,14 +88,14 @@ jobs:
 
       - name: Align APK
         run: |
-          $ANDROID_HOME/build-tools/35.0.0/zipalign \
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
             -p -f 4 \
             SpeedLife-unsigned.apk \
             SpeedLife-aligned.apk
 
       - name: Sign APK
         run: |
-          $ANDROID_HOME/build-tools/35.0.0/apksigner sign \
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
             --ks speedlife.keystore \
             --ks-key-alias speedlife \
             --ks-pass pass:speedlife123 \
@@ -87,13 +105,17 @@ jobs:
 
       - name: Verify APK
         run: |
-          $ANDROID_HOME/build-tools/35.0.0/apksigner verify --verbose SpeedLife.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify --verbose SpeedLife.apk
+
+          test -s SpeedLife.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SpeedLife-APK
           path: SpeedLife.apk
+          if-no-files-found: error
 
       - name: Attach APK to Release
         if: github.event_name == 'release'
