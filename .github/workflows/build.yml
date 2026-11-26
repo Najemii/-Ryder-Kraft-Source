@@ -34,7 +34,8 @@ jobs:
 
       - name: Install Android Build Tools
         run: |
-          yes | sdkmanager --licenses >/dev/null
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
           sdkmanager --install \
             "platform-tools" \
             "build-tools;35.0.0"
@@ -46,16 +47,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "SpeedLife_Full_Modified_Source.zip" \
-            --dir .
+          echo "Searching release: $TAG"
+
+          RELEASE_JSON=$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+
+          ASSET_ID=$(echo "$RELEASE_JSON" | jq -r '
+            [.assets[] |
+            select((.name | ascii_downcase) ==
+            "speedlife_full_modified_source.zip")][0].id // empty
+          ')
+
+          if [ -z "$ASSET_ID" ]; then
+            echo "Source ZIP not found!"
+            echo "Available release assets:"
+            echo "$RELEASE_JSON" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          curl -fL --retry 3 \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
+            -o SpeedLife_Full_Modified_Source.zip
 
           test -s SpeedLife_Full_Modified_Source.zip
+
           unzip -t SpeedLife_Full_Modified_Source.zip
 
           mkdir -p source
+
           unzip -q SpeedLife_Full_Modified_Source.zip -d source
+
+          echo "Source ZIP downloaded successfully."
 
       - name: Locate and validate project
         run: |
@@ -71,6 +95,7 @@ jobs:
           fi
 
           APKTOOL_DIR="$(dirname "${FILES[0]}")"
+
           echo "APKTOOL_DIR=$APKTOOL_DIR" >> "$GITHUB_ENV"
 
           test -f "$APKTOOL_DIR/AndroidManifest.xml"
@@ -79,11 +104,16 @@ jobs:
           grep -Fq 'speedlife.launcher.game' \
             "$APKTOOL_DIR/AndroidManifest.xml"
 
-          LISTENER="$(find "$APKTOOL_DIR" -name DirectConnectSubmitListener.smali -print -quit)"
+          LISTENER=$(find "$APKTOOL_DIR" \
+            -name DirectConnectSubmitListener.smali \
+            -print -quit)
 
           test -n "$LISTENER"
+
           grep -Fq '82.39.186.143' "$LISTENER"
           grep -Fq '7013' "$LISTENER"
+
+          echo "Project validation successful."
 
       - name: Fix duplicate resource IDs
         run: |
@@ -92,6 +122,7 @@ jobs:
           import xml.etree.ElementTree as ET
 
           path = sys.argv[1]
+
           tree = ET.parse(path)
           root = tree.getroot()
 
@@ -110,7 +141,14 @@ jobs:
                   seen[rid] = item.get("name")
 
           ET.indent(tree, space="    ")
-          tree.write(path, encoding="utf-8", xml_declaration=True)
+
+          tree.write(
+              path,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print("Resource IDs processed.")
           PY
 
       - name: Verify resource IDs
@@ -120,13 +158,18 @@ jobs:
           import xml.etree.ElementTree as ET
 
           root = ET.parse(sys.argv[1]).getroot()
+
           ids = set()
 
           for item in root.findall("public"):
               rid = item.get("id")
+
               if rid:
                   if rid in ids:
-                      raise SystemExit("Duplicate ID remains: " + rid)
+                      raise SystemExit(
+                          "Duplicate ID remains: " + rid
+                      )
+
                   ids.add(rid)
 
           print("Resource IDs verified.")
@@ -140,13 +183,16 @@ jobs:
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
 
+          test -s apktool.jar
+
           java -jar apktool.jar --version
 
       - name: Build APK
         run: |
           set -euo pipefail
 
-          rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
+          rm -rf "$APKTOOL_DIR/build"
+          rm -rf "$APKTOOL_DIR/dist"
 
           java -jar apktool.jar b \
             --use-aapt2 \
@@ -158,6 +204,8 @@ jobs:
 
           test -s SpeedLife-unsigned.apk
 
+          echo "APK build successful."
+
       - name: Align APK
         run: |
           set -euo pipefail
@@ -166,6 +214,8 @@ jobs:
             -p -f 4 \
             SpeedLife-unsigned.apk \
             SpeedLife-aligned.apk
+
+          test -s SpeedLife-aligned.apk
 
       - name: Sign APK
         env:
@@ -177,7 +227,13 @@ jobs:
           set -euo pipefail
 
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
+
+            : "${KEYSTORE_PASSWORD:?Missing keystore password}"
+            : "${KEY_ALIAS:?Missing key alias}"
+            : "${KEY_PASSWORD:?Missing key password}"
+
+            echo "$KEYSTORE_BASE64" | base64 --decode \
+              > speedlife.keystore
 
             "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
               --ks speedlife.keystore \
@@ -186,7 +242,11 @@ jobs:
               --key-pass env:KEY_PASSWORD \
               --out SpeedLife.apk \
               SpeedLife-aligned.apk
+
           else
+
+            echo "Generating temporary signing key."
+
             keytool -genkeypair \
               -keystore speedlife-temporary.keystore \
               -alias speedlife \
@@ -204,6 +264,7 @@ jobs:
               --key-pass pass:temporary123 \
               --out SpeedLife.apk \
               SpeedLife-aligned.apk
+
           fi
 
           test -s SpeedLife.apk
@@ -214,6 +275,8 @@ jobs:
 
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             --verbose SpeedLife.apk
+
+          echo "APK verification successful."
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -235,3 +298,5 @@ jobs:
             SpeedLife.apk \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+          echo "APK uploaded to Release successfully."
