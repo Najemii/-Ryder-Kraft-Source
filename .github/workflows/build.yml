@@ -32,6 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p input extracted
+
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             TAG="${{ inputs.release_tag }}"
           else
@@ -44,6 +45,7 @@ jobs:
             --dir input
 
           APK=$(find input -maxdepth 1 -type f -iname "*.apk" -print -quit)
+
           test -n "$APK" || {
             echo "APK file not found!"
             exit 1
@@ -60,12 +62,16 @@ jobs:
             .browser_download_url' | head -n 1)
 
           test -n "$URL"
+
           curl -fL "$URL" -o jadx.zip
           mkdir jadx
           unzip -q jadx.zip -d jadx
 
           JADX=$(find jadx -type f -path "*/bin/jadx" -print -quit)
+
+          test -n "$JADX"
           chmod +x "$JADX"
+
           echo "JADX=$JADX" >> "$GITHUB_ENV"
 
       - name: Decode APK
@@ -74,10 +80,17 @@ jobs:
           apktool d -f "$APK" -o extracted/apktool
 
       - name: Decompile Java
+        continue-on-error: true
         run: |
           mkdir -p extracted/jadx
+
           "$JADX" --show-bad-code \
-            -d extracted/jadx "$APK"
+            --no-imports \
+            -d extracted/jadx "$APK" || {
+              echo "JADX encountered errors."
+              echo "Keeping extracted files."
+              test -d extracted/jadx
+            }
 
       - name: Copy original APK
         run: |
