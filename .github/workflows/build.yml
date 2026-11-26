@@ -1,5 +1,5 @@
 
-name: Build SpeedLife APK
+name: Build SpeedLife NewLife APK
 
 on:
   release:
@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag containing the modified source ZIP"
+        description: "Release tag containing the latest modified source ZIP"
         required: true
-        default: "vv3"
+        default: "wv3"
 
 permissions:
   contents: write
@@ -38,15 +38,15 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "platform-tools" "build-tools;35.0.0"
 
-      - name: Download modified source ZIP
+      - name: Download latest modified source ZIP
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          ASSET_NAME: SpeedLife_Launcher_Settings_CrashFix_Source.zip
+          ASSET_NAME: SpeedLife_NewLife_UI_Port_Stage.zip
         run: |
           set -euo pipefail
 
-          echo "Searching release: $TAG"
+          echo "Building release: $TAG"
 
           RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
 
@@ -55,8 +55,8 @@ jobs:
             '[.assets[] | select(.name == $NAME)][0].id // empty')
 
           if [ -z "$ASSET_ID" ]; then
-            echo "Source ZIP not found in release $TAG"
-            echo "Available assets:"
+            echo "ERROR: Source ZIP not found: $ASSET_NAME"
+            echo "Available release assets:"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
@@ -73,7 +73,7 @@ jobs:
           mkdir -p source
           unzip -q "$ASSET_NAME" -d source
 
-      - name: Locate and validate project
+      - name: Locate and validate SpeedLife project
         run: |
           set -euo pipefail
 
@@ -96,11 +96,15 @@ jobs:
           LISTENER=$(find "$APKTOOL_DIR" \
             -name DirectConnectSubmitListener.smali -print -quit)
 
-          test -n "$LISTENER"
+          if [ -z "$LISTENER" ]; then
+            echo "DirectConnectSubmitListener.smali not found"
+            exit 1
+          fi
+
           grep -Fq '82.39.186.143' "$LISTENER"
           grep -Fq '7013' "$LISTENER"
 
-          echo "Project validation successful."
+          echo "SpeedLife project validation successful."
 
       - name: Fix Settings Layout Attribute
         run: |
@@ -168,7 +172,7 @@ jobs:
           test -s apktool.jar
           java -jar apktool.jar --version
 
-      - name: Build APK
+      - name: Build SpeedLife APK
         run: |
           set -euo pipefail
 
@@ -210,7 +214,6 @@ jobs:
               --ks-pass env:KEYSTORE_PASSWORD \
               --key-pass env:KEY_PASSWORD \
               --out SpeedLife.apk SpeedLife-aligned.apk
-
           else
             echo "Generating temporary signing key."
 
@@ -246,7 +249,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SpeedLife-APK
+          name: SpeedLife-NewLife-APK
           path: SpeedLife.apk
           if-no-files-found: error
           retention-days: 14
@@ -261,4 +264,4 @@ jobs:
           gh release upload "$TAG" SpeedLife.apk \
             --repo "$GITHUB_REPOSITORY" --clobber
 
-          echo "APK uploaded successfully."
+          echo "SpeedLife APK uploaded successfully."
