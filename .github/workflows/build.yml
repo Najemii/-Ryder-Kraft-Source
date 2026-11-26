@@ -2,6 +2,8 @@
 name: Extract Ryder Kraft APK
 
 on:
+  workflow_dispatch:
+
   release:
     types: [published]
 
@@ -25,10 +27,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "Ryder.Kraft.SA-MP.apk" \
-            --dir .
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            gh release download "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "Ryder.Kraft.SA-MP.apk" \
+              --dir .
+          else
+            gh release download \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "Ryder.Kraft.SA-MP.apk" \
+              --dir .
+          fi
 
       - name: Install JADX
         run: |
@@ -45,34 +54,58 @@ jobs:
           JADX=$(find jadx-tool -type f \
             -path '*/bin/jadx' -print -quit)
 
+          test -n "$JADX"
           chmod +x "$JADX"
           echo "JADX=$JADX" >> "$GITHUB_ENV"
 
-      - name: Extract APKTool
+      - name: Prepare folders
         run: |
           mkdir -p output/apktool
+          mkdir -p output/jadx
+          mkdir -p output/original
+
+      - name: Extract with APKTool
+        run: |
           apktool d -f "Ryder.Kraft.SA-MP.apk" \
             -o output/apktool
 
-      - name: Extract JADX
+      - name: Extract Java with JADX
         run: |
-          mkdir -p output/jadx
-          "$JADX" -d output/jadx \
+          "$JADX" \
+            --show-bad-code \
+            -d output/jadx \
             "Ryder.Kraft.SA-MP.apk"
 
       - name: Save original APK
         run: |
-          mkdir -p output/original
           cp "Ryder.Kraft.SA-MP.apk" output/original/
+
+      - name: Create README
+        run: |
+          cat > output/README.txt <<'EOF'
+          Ryder Kraft APK Extraction
+
+          apktool:
+          Decoded resources, XML, manifest and Smali.
+
+          jadx:
+          Decompiled Java source.
+
+          original:
+          Original APK.
+
+          Native libraries remain binary files.
+          This is not the original Android Studio project.
+          EOF
 
       - name: Create ZIP
         run: |
-          echo "Decompiled APK project" > output/README.txt
           zip -qr Ryder-Kraft-Source.zip output
 
-      - name: Upload ZIP
+      - name: Upload ZIP Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Ryder-Kraft-Source
           path: Ryder-Kraft-Source.zip
+          if-no-files-found: error
           retention-days: 30
