@@ -29,9 +29,10 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Build Tools
+      - name: Install Android Build Tools
         run: |
           yes | sdkmanager --licenses >/dev/null
+
           sdkmanager --install \
             "platform-tools" \
             "build-tools;35.0.0"
@@ -41,6 +42,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
+          set -e
+
+          echo "Downloading source from release: $TAG"
+
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "SpeedLife_Launcher_Settings_Redesign.zip" \
@@ -51,10 +56,13 @@ jobs:
           unzip -t SpeedLife_Launcher_Settings_Redesign.zip
 
           mkdir -p source
+
           unzip -q SpeedLife_Launcher_Settings_Redesign.zip -d source
 
       - name: Check Source
         run: |
+          set -e
+
           test -f source/apktool/apktool.yml
           test -f source/apktool/AndroidManifest.xml
 
@@ -66,27 +74,67 @@ jobs:
 
           grep -Fq '7013' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
+          echo "Source validation successful."
+
       - name: Install Apktool
         run: |
+          set -e
+
           curl -fL --retry 3 \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
 
           test -s apktool.jar
 
+          java -jar apktool.jar --version
+
       - name: Build APK
         run: |
-          java -jar apktool.jar b source/apktool \
-            -o SpeedLife-unsigned.apk
+          set -e
+
+          rm -rf source/apktool/build
+          rm -rf source/apktool/dist
+
+          echo "Trying AAPT2 build..."
+
+          if java -jar apktool.jar b \
+            --use-aapt2 \
+            --force \
+            --verbose \
+            source/apktool \
+            -o SpeedLife-unsigned.apk 2>&1 | tee build-aapt2.log; then
+
+            echo "AAPT2 build successful."
+
+          else
+
+            echo "AAPT2 failed. Trying AAPT1..."
+
+            rm -f SpeedLife-unsigned.apk
+            rm -rf source/apktool/build
+            rm -rf source/apktool/dist
+
+            java -jar apktool.jar b \
+              --use-aapt1 \
+              --force \
+              --verbose \
+              source/apktool \
+              -o SpeedLife-unsigned.apk 2>&1 | tee build-aapt1.log
+
+          fi
 
           test -s SpeedLife-unsigned.apk
 
       - name: Align APK
         run: |
+          set -e
+
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
             -p -f 4 \
             SpeedLife-unsigned.apk \
             SpeedLife-aligned.apk
+
+          test -s SpeedLife-aligned.apk
 
       - name: Generate Signing Key
         run: |
@@ -102,6 +150,8 @@ jobs:
 
       - name: Sign APK
         run: |
+          set -e
+
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
             --ks speedlife.keystore \
             --ks-key-alias speedlife \
@@ -110,10 +160,16 @@ jobs:
             --out SpeedLife.apk \
             SpeedLife-aligned.apk
 
+          test -s SpeedLife.apk
+
       - name: Verify APK
         run: |
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose SpeedLife.apk
-          test -s SpeedLife.apk
+          set -e
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose SpeedLife.apk
+
+          echo "APK verification successful."
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
