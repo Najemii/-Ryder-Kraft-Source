@@ -3,7 +3,6 @@ name: Extract Ryder Kraft APK
 
 on:
   workflow_dispatch:
-
   release:
     types: [published]
 
@@ -13,6 +12,7 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -23,21 +23,52 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apktool unzip zip curl jq
 
-      - name: Download APK
+      - name: Find APK in Draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK_NAME: Ryder.Kraft.SA-MP.apk
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > releases.json
+
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            ASSET_ID=$(jq -r \
+              --arg tag "$GITHUB_REF_NAME" \
+              --arg name "$APK_NAME" \
+              '.[] | select(.tag_name == $tag) |
+              .assets[] | select(.name == $name) | .id' \
+              releases.json | head -n 1)
+          else
+            ASSET_ID=$(jq -r \
+              --arg name "$APK_NAME" \
+              '.[] | select(.draft == true) |
+              .assets[] | select(.name == $name) | .id' \
+              releases.json | head -n 1)
+          fi
+
+          if [ -z "$ASSET_ID" ]; then
+            echo "ERROR: APK asset not found."
+            echo "Available releases and assets:"
+            jq -r '.[] |
+              "Release: \(.tag_name), Draft: \(.draft)",
+              (.assets[]?.name)' releases.json
+            exit 1
+          fi
+
+          echo "ASSET_ID=$ASSET_ID" >> "$GITHUB_ENV"
+
+      - name: Download Draft APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
-            gh release download "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern "Ryder.Kraft.SA-MP.apk" \
-              --dir .
-          else
-            gh release download \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern "Ryder.Kraft.SA-MP.apk" \
-              --dir .
-          fi
+          curl -fL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
+            -o Ryder.Kraft.SA-MP.apk
+
+          test -s Ryder.Kraft.SA-MP.apk
+          file Ryder.Kraft.SA-MP.apk
 
       - name: Install JADX
         run: |
@@ -66,7 +97,7 @@ jobs:
 
       - name: Extract with APKTool
         run: |
-          apktool d -f "Ryder.Kraft.SA-MP.apk" \
+          apktool d -f Ryder.Kraft.SA-MP.apk \
             -o output/apktool
 
       - name: Extract Java with JADX
@@ -74,11 +105,11 @@ jobs:
           "$JADX" \
             --show-bad-code \
             -d output/jadx \
-            "Ryder.Kraft.SA-MP.apk"
+            Ryder.Kraft.SA-MP.apk
 
       - name: Save original APK
         run: |
-          cp "Ryder.Kraft.SA-MP.apk" output/original/
+          cp Ryder.Kraft.SA-MP.apk output/original/
 
       - name: Create README
         run: |
@@ -102,7 +133,7 @@ jobs:
         run: |
           zip -qr Ryder-Kraft-Source.zip output
 
-      - name: Upload ZIP Artifact
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
           name: Ryder-Kraft-Source
