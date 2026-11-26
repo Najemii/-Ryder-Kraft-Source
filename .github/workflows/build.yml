@@ -32,7 +32,6 @@ jobs:
       - name: Install Android Build Tools
         run: |
           yes | sdkmanager --licenses >/dev/null
-
           sdkmanager --install \
             "platform-tools" \
             "build-tools;35.0.0"
@@ -44,8 +43,6 @@ jobs:
         run: |
           set -e
 
-          echo "Downloading source from release: $TAG"
-
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "SpeedLife_Launcher_Settings_Redesign.zip" \
@@ -56,7 +53,6 @@ jobs:
           unzip -t SpeedLife_Launcher_Settings_Redesign.zip
 
           mkdir -p source
-
           unzip -q SpeedLife_Launcher_Settings_Redesign.zip -d source
 
       - name: Check Source
@@ -65,6 +61,7 @@ jobs:
 
           test -f source/apktool/apktool.yml
           test -f source/apktool/AndroidManifest.xml
+          test -f source/apktool/res/values/public.xml
 
           test -f source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
@@ -75,6 +72,78 @@ jobs:
           grep -Fq '7013' source/apktool/smali/ro/alyn_sampmobile/launcher/DirectConnectSubmitListener.smali
 
           echo "Source validation successful."
+
+      - name: Fix Duplicate Resource IDs
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from collections import defaultdict
+
+          path = "source/apktool/res/values/public.xml"
+
+          tree = ET.parse(path)
+          root = tree.getroot()
+
+          seen = {}
+          fixed = []
+
+          for item in root.findall("public"):
+              resource_id = item.get("id")
+
+              if not resource_id:
+                  continue
+
+              if resource_id in seen:
+                  old_name = seen[resource_id]
+                  new_name = item.get("name")
+
+                  print(
+                      f"Fixing duplicate ID {resource_id}: "
+                      f"{old_name} / {new_name}"
+                  )
+
+                  item.attrib.pop("id", None)
+                  fixed.append(new_name)
+              else:
+                  seen[resource_id] = item.get("name")
+
+          ET.indent(tree, space="    ")
+          tree.write(
+              path,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print(f"Fixed {len(fixed)} duplicate resource IDs.")
+
+          if len(fixed) == 0:
+              print("No duplicate IDs found.")
+          PY
+
+      - name: Verify Resource IDs
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(
+              "source/apktool/res/values/public.xml"
+          ).getroot()
+
+          ids = {}
+
+          for item in root.findall("public"):
+              rid = item.get("id")
+
+              if rid:
+                  if rid in ids:
+                      raise SystemExit(
+                          f"Duplicate ID remains: {rid}"
+                      )
+
+                  ids[rid] = item.get("name")
+
+          print("All explicit resource IDs are unique.")
+          PY
 
       - name: Install Apktool
         run: |
@@ -91,39 +160,22 @@ jobs:
       - name: Build APK
         run: |
           set -e
+          set -o pipefail
 
           rm -rf source/apktool/build
           rm -rf source/apktool/dist
 
-          echo "Trying AAPT2 build..."
-
-          if java -jar apktool.jar b \
+          java -jar apktool.jar b \
             --use-aapt2 \
             --force \
             --verbose \
             source/apktool \
-            -o SpeedLife-unsigned.apk 2>&1 | tee build-aapt2.log; then
-
-            echo "AAPT2 build successful."
-
-          else
-
-            echo "AAPT2 failed. Trying AAPT1..."
-
-            rm -f SpeedLife-unsigned.apk
-            rm -rf source/apktool/build
-            rm -rf source/apktool/dist
-
-            java -jar apktool.jar b \
-              --use-aapt1 \
-              --force \
-              --verbose \
-              source/apktool \
-              -o SpeedLife-unsigned.apk 2>&1 | tee build-aapt1.log
-
-          fi
+            -o SpeedLife-unsigned.apk \
+            2>&1 | tee build.log
 
           test -s SpeedLife-unsigned.apk
+
+          echo "APK build successful."
 
       - name: Align APK
         run: |
