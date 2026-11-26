@@ -1,110 +1,98 @@
 
-name: Extract Ryder Kraft APK
+name: Build SpeedLife APK
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Release tag
-        required: true
-        default: apk_v1
 
 permissions:
   contents: read
 
 jobs:
-  extract:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apktool unzip zip jq
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Download APK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install build tools
+        run: sdkmanager "build-tools;35.0.0"
+
+      - name: Download source from Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p input extracted
-
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.release_tag }}"
-          else
-            TAG="$GITHUB_REF_NAME"
-          fi
-
-          gh release download "$TAG" \
+          mkdir -p source
+          gh release download SpeedLife_v1 \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "*.apk" \
-            --dir input
+            --pattern "SpeedLife_modified_source.zip" \
+            --dir source
 
-          APK=$(find input -maxdepth 1 -type f -iname "*.apk" -print -quit)
+          test -f source/SpeedLife_modified_source.zip
 
-          test -n "$APK" || {
-            echo "APK file not found!"
-            exit 1
-          }
-
-          echo "APK=$APK" >> "$GITHUB_ENV"
-
-      - name: Install JADX
+      - name: Extract source
         run: |
-          URL=$(curl -fsSL \
-            https://api.github.com/repos/skylot/jadx/releases/latest \
-            | jq -r '.assets[] |
-            select(.name | test("^jadx-[0-9].*\\.zip$")) |
-            .browser_download_url' | head -n 1)
+          unzip -q source/SpeedLife_modified_source.zip -d source
+          test -f source/apktool/apktool.yml
+          test -f source/apktool/AndroidManifest.xml
 
-          test -n "$URL"
-
-          curl -fL "$URL" -o jadx.zip
-          mkdir jadx
-          unzip -q jadx.zip -d jadx
-
-          JADX=$(find jadx -type f -path "*/bin/jadx" -print -quit)
-
-          test -n "$JADX"
-          chmod +x "$JADX"
-
-          echo "JADX=$JADX" >> "$GITHUB_ENV"
-
-      - name: Decode APK
+      - name: Download Apktool
         run: |
-          mkdir -p extracted/apktool
-          apktool d -f "$APK" -o extracted/apktool
+          curl -L --fail --retry 3 \
+            -o apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
 
-      - name: Decompile Java
-        continue-on-error: true
+      - name: Build APK
         run: |
-          mkdir -p extracted/jadx
+          java -jar apktool.jar b source/apktool \
+            -o SpeedLife-unsigned.apk
 
-          "$JADX" --show-bad-code \
-            --no-imports \
-            -d extracted/jadx "$APK" || {
-              echo "JADX encountered errors."
-              echo "Keeping extracted files."
-              test -d extracted/jadx
-            }
+          test -s SpeedLife-unsigned.apk
 
-      - name: Copy original APK
+      - name: Align APK
         run: |
-          mkdir -p extracted/original
-          cp "$APK" extracted/original/
+          $ANDROID_HOME/build-tools/35.0.0/zipalign \
+            -p -f 4 SpeedLife-unsigned.apk SpeedLife-aligned.apk
 
-      - name: Create ZIP
+      - name: Create signing key
         run: |
-          zip -qr Ryder-Kraft-Source.zip extracted
+          keytool -genkeypair -v \
+            -keystore speedlife-temporary.jks \
+            -storepass changeit \
+            -keypass changeit \
+            -alias speedlife \
+            -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=SpeedLife, OU=Build, O=SpeedLife, L=Unknown, ST=Unknown, C=US"
 
-      - name: Upload Artifact
+      - name: Sign APK
+        run: |
+          $ANDROID_HOME/build-tools/35.0.0/apksigner sign \
+            --ks speedlife-temporary.jks \
+            --ks-key-alias speedlife \
+            --ks-pass pass:changeit \
+            --key-pass pass:changeit \
+            --out SpeedLife.apk SpeedLife-aligned.apk
+
+      - name: Verify APK
+        run: |
+          $ANDROID_HOME/build-tools/35.0.0/apksigner verify \
+            --verbose --print-certs SpeedLife.apk
+
+          test -s SpeedLife.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Ryder-Kraft-Source
-          path: Ryder-Kraft-Source.zip
+          name: SpeedLife-APK
+          path: SpeedLife.apk
           if-no-files-found: error
-          retention-days: 30
