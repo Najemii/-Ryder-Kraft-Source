@@ -1,5 +1,5 @@
 
-name: Build SpeedLife NewLife APK
+name: Build SpeedLife APK
 
 on:
   release:
@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag containing the latest modified source ZIP"
+        description: "Release tag containing the modified source ZIP"
         required: true
-        default: "wv3"
+        default: "vv3"
 
 permissions:
   contents: write
@@ -38,7 +38,7 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "platform-tools" "build-tools;35.0.0"
 
-      - name: Download latest modified source ZIP
+      - name: Download modified source ZIP
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Building release: $TAG"
+          echo "Searching release: $TAG"
 
           RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
 
@@ -55,8 +55,8 @@ jobs:
             '[.assets[] | select(.name == $NAME)][0].id // empty')
 
           if [ -z "$ASSET_ID" ]; then
-            echo "ERROR: Source ZIP not found: $ASSET_NAME"
-            echo "Available release assets:"
+            echo "Source ZIP not found in release $TAG"
+            echo "Available assets:"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
@@ -73,7 +73,7 @@ jobs:
           mkdir -p source
           unzip -q "$ASSET_NAME" -d source
 
-      - name: Locate and validate SpeedLife project
+      - name: Locate and validate project
         run: |
           set -euo pipefail
 
@@ -96,15 +96,11 @@ jobs:
           LISTENER=$(find "$APKTOOL_DIR" \
             -name DirectConnectSubmitListener.smali -print -quit)
 
-          if [ -z "$LISTENER" ]; then
-            echo "DirectConnectSubmitListener.smali not found"
-            exit 1
-          fi
-
+          test -n "$LISTENER"
           grep -Fq '82.39.186.143' "$LISTENER"
           grep -Fq '7013' "$LISTENER"
 
-          echo "SpeedLife project validation successful."
+          echo "Project validation successful."
 
       - name: Fix Settings Layout Attribute
         run: |
@@ -172,7 +168,7 @@ jobs:
           test -s apktool.jar
           java -jar apktool.jar --version
 
-      - name: Build SpeedLife APK
+      - name: Build APK
         run: |
           set -euo pipefail
 
@@ -214,6 +210,7 @@ jobs:
               --ks-pass env:KEYSTORE_PASSWORD \
               --key-pass env:KEY_PASSWORD \
               --out SpeedLife.apk SpeedLife-aligned.apk
+
           else
             echo "Generating temporary signing key."
 
@@ -264,4 +261,4 @@ jobs:
           gh release upload "$TAG" SpeedLife.apk \
             --repo "$GITHUB_REPOSITORY" --clobber
 
-          echo "SpeedLife APK uploaded successfully."
+          echo "APK uploaded successfully."
