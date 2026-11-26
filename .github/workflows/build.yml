@@ -1,3 +1,4 @@
+
 name: Build SpeedLife APK
 
 on:
@@ -41,14 +42,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          ASSET_NAME: SpeedLife_Launcher_Settings_CrashFix_Source.zip
         run: |
           set -euo pipefail
           echo "Searching release: $TAG"
 
           RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
-          ASSET_ID=$(echo "$RELEASE_JSON" | jq -r '
-            [.assets[] | select(.name == "SpeedLife_Launcher_NAME_Settings_Fixed.zip")][0].id // empty
-          ')
+
+          ASSET_ID=$(echo "$RELEASE_JSON" | jq -r \
+            --arg NAME "$ASSET_NAME" \
+            '[.assets[] | select(.name == $NAME)][0].id // empty')
 
           if [ -z "$ASSET_ID" ]; then
             echo "Modified source ZIP not found in release $TAG."
@@ -61,16 +64,18 @@ jobs:
             -H "Accept: application/octet-stream" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
-            -o SpeedLife_Launcher_NAME_Settings_Fixed.zip
+            -o "$ASSET_NAME"
 
-          test -s SpeedLife_Launcher_NAME_Settings_Fixed.zip
-          unzip -t SpeedLife_Launcher_NAME_Settings_Fixed.zip
+          test -s "$ASSET_NAME"
+          unzip -t "$ASSET_NAME"
+
           mkdir -p source
-          unzip -q SpeedLife_Launcher_NAME_Settings_Fixed.zip -d source
+          unzip -q "$ASSET_NAME" -d source
 
       - name: Locate and validate project
         run: |
           set -euo pipefail
+
           mapfile -t FILES < <(find source -type f -name apktool.yml)
 
           if [ "${#FILES[@]}" -ne 1 ]; then
@@ -83,33 +88,45 @@ jobs:
 
           test -f "$APKTOOL_DIR/AndroidManifest.xml"
           test -f "$APKTOOL_DIR/res/values/public.xml"
-          grep -Fq 'speedlife.launcher.game' "$APKTOOL_DIR/AndroidManifest.xml"
 
-          LISTENER=$(find "$APKTOOL_DIR" -name DirectConnectSubmitListener.smali -print -quit)
+          grep -Fq 'speedlife.launcher.game' \
+            "$APKTOOL_DIR/AndroidManifest.xml"
+
+          LISTENER=$(find "$APKTOOL_DIR" \
+            -name DirectConnectSubmitListener.smali -print -quit)
+
           test -n "$LISTENER"
           grep -Fq '82.39.186.143' "$LISTENER"
           grep -Fq '7013' "$LISTENER"
+
           echo "Project validation successful."
 
       - name: Fix Settings Layout Attribute
         run: |
           set -euo pipefail
+
           FILE="$APKTOOL_DIR/res/layout/fragment_settings_page.xml"
+
           if [ -f "$FILE" ]; then
             python3 - "$FILE" <<'PY'
           import sys
           import re
+
           path = sys.argv[1]
+
           with open(path, "r", encoding="utf-8") as f:
               content = f.read()
+
           updated, count = re.subn(
               r'(\bboxBackgroundMode\s*=\s*["\'])outlined(["\'])',
               r'\1outline\2',
               content
           )
+
           if count:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(updated)
+
           print(f"Adjusted {count} boxBackgroundMode value(s).")
           PY
           else
@@ -119,42 +136,55 @@ jobs:
       - name: Verify resource IDs
         run: |
           set -euo pipefail
+
           python3 - "$APKTOOL_DIR/res/values/public.xml" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
+
           root = ET.parse(sys.argv[1]).getroot()
           seen = set()
+
           for item in root.findall("public"):
               rid = item.get("id")
+
               if rid and rid in seen:
                   raise SystemExit("Duplicate resource ID: " + rid)
+
               if rid:
                   seen.add(rid)
+
           print("Resource IDs verified.")
           PY
 
       - name: Install Apktool
         run: |
           set -euo pipefail
+
           curl -fL --retry 3 \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
+
           test -s apktool.jar
           java -jar apktool.jar --version
 
       - name: Build APK
         run: |
           set -euo pipefail
+
           rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
+
           java -jar apktool.jar b --use-aapt2 --force --verbose \
             "$APKTOOL_DIR" -o SpeedLife-unsigned.apk 2>&1 | tee build.log
+
           test -s SpeedLife-unsigned.apk
 
       - name: Align APK
         run: |
           set -euo pipefail
+
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -p -f 4 \
             SpeedLife-unsigned.apk SpeedLife-aligned.apk
+
           test -s SpeedLife-aligned.apk
 
       - name: Sign APK
@@ -165,32 +195,51 @@ jobs:
           KEY_PASSWORD: ${{ secrets.SPEEDLIFE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             : "${KEYSTORE_PASSWORD:?Missing keystore password}"
             : "${KEY_ALIAS:?Missing key alias}"
             : "${KEY_PASSWORD:?Missing key password}"
+
             echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
+
             "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-              --ks speedlife.keystore --ks-key-alias "$KEY_ALIAS" \
-              --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+              --ks speedlife.keystore \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD \
+              --key-pass env:KEY_PASSWORD \
               --out SpeedLife.apk SpeedLife-aligned.apk
+
           else
-            echo "Generating temporary signing key; this APK will not update an installation signed with another key."
-            keytool -genkeypair -keystore speedlife-temporary.keystore \
-              -alias speedlife -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass temporary123 -keypass temporary123 \
+            echo "Generating temporary signing key."
+
+            keytool -genkeypair \
+              -keystore speedlife-temporary.keystore \
+              -alias speedlife \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass temporary123 \
+              -keypass temporary123 \
               -dname "CN=SpeedLife, OU=Android, O=SpeedLife, L=Tunis, S=Tunis, C=TN"
+
             "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-              --ks speedlife-temporary.keystore --ks-key-alias speedlife \
-              --ks-pass pass:temporary123 --key-pass pass:temporary123 \
+              --ks speedlife-temporary.keystore \
+              --ks-key-alias speedlife \
+              --ks-pass pass:temporary123 \
+              --key-pass pass:temporary123 \
               --out SpeedLife.apk SpeedLife-aligned.apk
           fi
+
           test -s SpeedLife.apk
 
       - name: Verify APK
         run: |
           set -euo pipefail
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose SpeedLife.apk
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify --verbose SpeedLife.apk
+
           echo "APK verification successful."
 
       - name: Upload APK Artifact
@@ -207,6 +256,8 @@ jobs:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
+
           gh release upload "$TAG" SpeedLife.apk \
             --repo "$GITHUB_REPOSITORY" --clobber
+
           echo "APK uploaded successfully."
