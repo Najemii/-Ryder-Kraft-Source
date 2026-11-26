@@ -1,5 +1,5 @@
 
-name: Build SpeedLife Lancher APK
+name: Build SpeedLife APK
 
 on:
   release:
