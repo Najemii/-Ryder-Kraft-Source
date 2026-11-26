@@ -45,6 +45,7 @@ jobs:
           ASSET_NAME: SpeedLife_Launcher_Settings_CrashFix_Source.zip
         run: |
           set -euo pipefail
+
           echo "Searching release: $TAG"
 
           RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
@@ -54,7 +55,7 @@ jobs:
             '[.assets[] | select(.name == $NAME)][0].id // empty')
 
           if [ -z "$ASSET_ID" ]; then
-            echo "Modified source ZIP not found in release $TAG."
+            echo "Source ZIP not found in release $TAG"
             echo "Available assets:"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
@@ -127,7 +128,7 @@ jobs:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(updated)
 
-          print(f"Adjusted {count} boxBackgroundMode value(s).")
+          print(f"Adjusted {count} value(s).")
           PY
           else
             echo "Settings layout not found; skipping."
