@@ -42,7 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          ASSET_NAME: SpeedLife_NewLife_UI_Port_Stage.zip
+          ASSET_NAME: SpeedLife_Launcher_Settings_CrashFix_Source.zip
         run: |
           set -euo pipefail
 
@@ -183,82 +183,4 @@ jobs:
         run: |
           set -euo pipefail
 
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -p -f 4 \
-            SpeedLife-unsigned.apk SpeedLife-aligned.apk
-
-          test -s SpeedLife-aligned.apk
-
-      - name: Sign APK
-        env:
-          KEYSTORE_BASE64: ${{ secrets.SPEEDLIFE_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.SPEEDLIFE_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.SPEEDLIFE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.SPEEDLIFE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          if [ -n "${KEYSTORE_BASE64:-}" ]; then
-            : "${KEYSTORE_PASSWORD:?Missing keystore password}"
-            : "${KEY_ALIAS:?Missing key alias}"
-            : "${KEY_PASSWORD:?Missing key password}"
-
-            echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
-
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-              --ks speedlife.keystore \
-              --ks-key-alias "$KEY_ALIAS" \
-              --ks-pass env:KEYSTORE_PASSWORD \
-              --key-pass env:KEY_PASSWORD \
-              --out SpeedLife.apk SpeedLife-aligned.apk
-
-          else
-            echo "Generating temporary signing key."
-
-            keytool -genkeypair \
-              -keystore speedlife-temporary.keystore \
-              -alias speedlife \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass temporary123 \
-              -keypass temporary123 \
-              -dname "CN=SpeedLife, OU=Android, O=SpeedLife, L=Tunis, S=Tunis, C=TN"
-
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-              --ks speedlife-temporary.keystore \
-              --ks-key-alias speedlife \
-              --ks-pass pass:temporary123 \
-              --key-pass pass:temporary123 \
-              --out SpeedLife.apk SpeedLife-aligned.apk
-          fi
-
-          test -s SpeedLife.apk
-
-      - name: Verify APK
-        run: |
-          set -euo pipefail
-
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
-            verify --verbose SpeedLife.apk
-
-          echo "APK verification successful."
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SpeedLife-NewLife-APK
-          path: SpeedLife.apk
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Attach APK to Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: |
-          set -euo pipefail
-
-          gh release upload "$TAG" SpeedLife.apk \
-            --repo "$GITHUB_REPOSITORY" --clobber
-
-          echo "APK uploaded successfully."
+          "$ANDROID_HOME/buil
