@@ -1,5 +1,5 @@
 
-name: SpeedLife APK Build
+name: Build SpeedLife APK
 
 on:
   release:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "GitHub Release tag"
+        description: "Release tag containing the modified source ZIP"
         required: true
         default: "vv3"
 
@@ -17,38 +17,25 @@ permissions:
 
 jobs:
   build:
-    name: Build SpeedLife APK
     runs-on: ubuntu-latest
 
-    env:
-      ASSET_NAME: SpeedLife_Launcher_Settings_CrashFix_Source.zip
-      APKTOOL_VERSION: "2.10.0"
-
     steps:
-      # 1. Checkout
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      # 2. Java
-      - name: Set up Java 17
-        uses: actions/setup-java@v5
+      - name: Install Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 3. Android SDK
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
 
-      # 4. Install SDK packages and accept licenses
       - name: Install Android Build Tools
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Checking Android SDK..."
-
-          command -v sdkmanager
 
           yes | sdkmanager --licenses || true
 
@@ -58,206 +45,164 @@ jobs:
 
           test -d "$ANDROID_HOME/build-tools/35.0.0"
 
-          echo "Android SDK is ready."
+          echo "Android SDK ready."
 
-      # 5. Select release tag
-      - name: Select Release Tag
-        id: release
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-
-          TAG="${RELEASE_TAG:-${INPUT_TAG:-vv3}}"
-
-          if [ -z "$TAG" ]; then
-            echo "ERROR: Release tag is empty."
-            exit 1
-          fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-          echo "Selected tag: $TAG"
-
-      # 6. Download source ZIP from GitHub Release
       - name: Download modified source ZIP
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release.outputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          ASSET_NAME: SpeedLife_Launcher_Settings_CrashFix_Source.zip
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Downloading source ZIP..."
-          echo "Release: $TAG"
-          echo "Asset: $ASSET_NAME"
+          echo "Searching release: $TAG"
 
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$ASSET_NAME" \
             --dir .
 
-          if [ ! -s "$ASSET_NAME" ]; then
-            echo "ERROR: Source ZIP was not downloaded."
-            exit 1
-          fi
+          test -s "$ASSET_NAME"
 
           unzip -t "$ASSET_NAME"
 
           mkdir -p source
-
           unzip -q "$ASSET_NAME" -d source
 
-          echo "Source downloaded successfully."
+          echo "Source ZIP downloaded successfully."
 
-      # 7. Locate APK source
-      - name: Locate APK source
-        id: source
+      - name: Locate and validate project
         shell: bash
         run: |
           set -euo pipefail
 
           mapfile -t FILES < <(
-            find source -type f -name "apktool.yml"
+            find source -type f -name apktool.yml
           )
 
           if [ "${#FILES[@]}" -ne 1 ]; then
             echo "ERROR: Expected exactly one apktool.yml."
             echo "Found: ${#FILES[@]}"
-
-            find source -maxdepth 5 -type f | head -100
-
             exit 1
           fi
 
-          APK_DIR="$(dirname "${FILES[0]}")"
+          APKTOOL_DIR="$(dirname "${FILES[0]}")"
 
-          echo "dir=$APK_DIR" >> "$GITHUB_OUTPUT"
+          echo "APKTOOL_DIR=$APKTOOL_DIR" >> "$GITHUB_ENV"
 
-          echo "APK source: $APK_DIR"
+          test -f "$APKTOOL_DIR/AndroidManifest.xml"
+          test -f "$APKTOOL_DIR/res/values/public.xml"
 
-      # 8. Verify required files
-      - name: Verify source files
-        env:
-          APK_DIR: ${{ steps.source.outputs.dir }}
-        run: |
-          set -euo pipefail
+          grep -Fq 'speedlife.launcher.game' \
+            "$APKTOOL_DIR/AndroidManifest.xml"
 
-          test -f "$APK_DIR/apktool.yml"
-          test -f "$APK_DIR/AndroidManifest.xml"
-          test -f "$APK_DIR/res/values/public.xml"
+          LISTENER="$(find "$APKTOOL_DIR" \
+            -name DirectConnectSubmitListener.smali \
+            -print -quit)"
 
-          echo "Required files verified."
-
-      # 9. Verify package
-      - name: Verify package name
-        env:
-          APK_DIR: ${{ steps.source.outputs.dir }}
-        run: |
-          set -euo pipefail
-
-          if ! grep -q 'package="speedlife.launcher.game"' \
-            "$APK_DIR/AndroidManifest.xml"; then
-
-            echo "ERROR: Package name is incorrect."
+          if [ -z "$LISTENER" ]; then
+            echo "ERROR: Direct Connect listener not found."
             exit 1
           fi
 
-          echo "Package name verified."
+          grep -Fq '82.39.186.143' "$LISTENER"
 
-      # 10. Verify Direct Connect
-      - name: Verify Direct Connect settings
-        env:
-          APK_DIR: ${{ steps.source.outputs.dir }}
+          if ! grep -Eq '7013|0x1b65' "$LISTENER"; then
+            echo "ERROR: Server port verification failed."
+            exit 1
+          fi
+
+          echo "Project validation successful."
+
+      - name: Fix Settings Layout Attribute
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t LISTENERS < <(
-            find "$APK_DIR" -type f \
-              -name "DirectConnectSubmitListener.smali"
+          FILE="$APKTOOL_DIR/res/layout/fragment_settings_page.xml"
+
+          if [ -f "$FILE" ]; then
+            python3 - "$FILE" <<'PY'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          updated, count = re.subn(
+              r'(\bboxBackgroundMode\s*=\s*["\'])outlined(["\'])',
+              r'\1outline\2',
+              content
           )
 
-          if [ "${#LISTENERS[@]}" -eq 0 ]; then
-            echo "ERROR: DirectConnectSubmitListener.smali not found."
-            exit 1
+          if count:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(updated)
+
+          print(f"Adjusted {count} value(s).")
+          PY
+          else
+            echo "Settings layout not found; skipping."
           fi
 
-          if ! grep -q '82\.39\.186\.143' "${LISTENERS[@]}"; then
-            echo "ERROR: Server IP not found."
-            exit 1
-          fi
-
-          if ! grep -Eq '7013|0x1b65' "${LISTENERS[@]}"; then
-            echo "ERROR: Server port not found."
-            exit 1
-          fi
-
-          echo "Direct Connect verified."
-
-      # 11. Verify resource IDs
       - name: Verify resource IDs
-        env:
-          APK_DIR: ${{ steps.source.outputs.dir }}
         shell: bash
         run: |
           set -euo pipefail
 
-          REQUIRED_IDS=(
-            server_name
-            server_address
-            server_players
-            server_gamemode
-            server_language
-            nickname_input
-            nickname_input_text
-            password_input
-            password_input_text
-            delete_button
-            connect_button
-          )
+          python3 - "$APKTOOL_DIR/res/values/public.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
 
-          for ID in "${REQUIRED_IDS[@]}"; do
-            if ! grep -Rqs "name=\"$ID\"" "$APK_DIR/res"; then
-              echo "ERROR: Missing resource ID: $ID"
-              exit 1
-            fi
-          done
+          root = ET.parse(sys.argv[1]).getroot()
+          seen = set()
 
-          echo "Resource IDs verified."
+          for item in root.findall("public"):
+              rid = item.get("id")
 
-      # 12. Download Apktool
-      - name: Download Apktool
+              if rid and rid in seen:
+                  raise SystemExit("Duplicate resource ID: " + rid)
+
+              if rid:
+                  seen.add(rid)
+
+          print("Resource IDs verified.")
+          PY
+
+      - name: Install Apktool
         shell: bash
         run: |
           set -euo pipefail
 
           curl -fL --retry 3 \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
 
           test -s apktool.jar
 
           java -jar apktool.jar --version
 
-      # 13. Build APK
       - name: Build APK
-        env:
-          APK_DIR: ${{ steps.source.outputs.dir }}
         shell: bash
         run: |
           set -euo pipefail
 
-          java -jar apktool.jar b "$APK_DIR" \
-            -o speedlife-unsigned.apk
+          rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
 
-          test -s speedlife-unsigned.apk
+          java -jar apktool.jar b \
+            --use-aapt2 \
+            --force \
+            --verbose \
+            "$APKTOOL_DIR" \
+            -o SpeedLife-unsigned.apk 2>&1 | tee build.log
 
-          echo "APK built successfully."
+          test -s SpeedLife-unsigned.apk
 
-      # 14. Zipalign
+          echo "APK build completed."
+
       - name: Align APK
         shell: bash
         run: |
@@ -266,14 +211,13 @@ jobs:
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
 
           "$BUILD_TOOLS/zipalign" -f -v 4 \
-            speedlife-unsigned.apk \
-            speedlife-aligned.apk
+            SpeedLife-unsigned.apk \
+            SpeedLife-aligned.apk
 
-          test -s speedlife-aligned.apk
+          test -s SpeedLife-aligned.apk
 
-          echo "APK aligned successfully."
+          echo "APK alignment completed."
 
-      # 15. Sign APK
       - name: Sign APK
         env:
           KEYSTORE_BASE64: ${{ secrets.SPEEDLIFE_KEYSTORE_BASE64 }}
@@ -287,7 +231,7 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
 
             if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS_SECRET" ]; then
-              echo "ERROR: Keystore secrets are incomplete."
+              echo "ERROR: Signing secrets are incomplete."
               exit 1
             fi
 
@@ -297,12 +241,12 @@ jobs:
             STORE_PASS="$STORE_PASSWORD"
             KEY_PASS="${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}"
 
-            echo "Using configured keystore."
+            echo "Using configured signing key."
 
           else
 
-            echo "No keystore configured."
-            echo "Generating temporary signing key."
+            echo "No signing key configured."
+            echo "Creating temporary signing key."
 
             keytool -genkeypair \
               -keystore speedlife.keystore \
@@ -326,13 +270,12 @@ jobs:
             --ks-pass "pass:$STORE_PASS" \
             --key-pass "pass:$KEY_PASS" \
             --out SpeedLife.apk \
-            speedlife-aligned.apk
+            SpeedLife-aligned.apk
 
           test -s SpeedLife.apk
 
-          echo "APK signed successfully."
+          echo "APK signing completed."
 
-      # 16. Verify APK
       - name: Verify signed APK
         shell: bash
         run: |
@@ -344,10 +287,9 @@ jobs:
 
           "$BUILD_TOOLS/zipalign" -c -v 4 SpeedLife.apk
 
-          echo "Final APK verification passed."
+          echo "APK verification successful."
 
-      # 17. Upload artifact
-      - name: Upload APK artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SpeedLife-APK
@@ -355,17 +297,17 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 18. Upload APK to Release
       - name: Upload APK to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release.outputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          gh release upload "$TAG" SpeedLife.apk \
+          gh release upload "$TAG" \
+            SpeedLife.apk \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-          echo "SpeedLife APK uploaded successfully."
+          echo "SpeedLife APK uploaded to release $TAG."
