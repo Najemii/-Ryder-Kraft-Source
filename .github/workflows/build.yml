@@ -114,62 +114,48 @@ steps:
 
       echo "Project validation successful."
 
-  # FIX: SL.Chip was interpreted as requiring a missing parent style SL.
-  - name: Fix SL Chip Resource
+  - name: Fix SL Chip Style Parent
     shell: bash
     run: |
       set -euo pipefail
 
       STYLE_FILE="$APKTOOL_DIR/res/values/sl_styles.xml"
 
-      test -f "$STYLE_FILE"
-
-      python3 - "$APKTOOL_DIR" <<'PY'
-      import sys
-      from pathlib import Path
-
-      root = Path(sys.argv[1])
-
-      style_file = root / "res/values/sl_styles.xml"
-      content = style_file.read_text(encoding="utf-8")
-
-      old_definition = '<style name="SL.Chip">'
-      new_definition = '<style name="SL_Chip">'
-
-      if old_definition not in content:
-          if new_definition not in content:
-              raise SystemExit("ERROR: SL.Chip definition not found.")
-      else:
-          content = content.replace(old_definition, new_definition)
-          style_file.write_text(content, encoding="utf-8")
-
-      changed = 0
-
-      for path in (root / "res").rglob("*.xml"):
-          content = path.read_text(encoding="utf-8")
-
-          updated = content.replace(
-              "@style/SL.Chip",
-              "@style/SL_Chip"
-          )
-
-          if updated != content:
-              path.write_text(updated, encoding="utf-8")
-              changed += 1
-
-      check = style_file.read_text(encoding="utf-8")
-
-      if '<style name="SL_Chip">' not in check:
-          raise SystemExit("ERROR: SL_Chip definition missing.")
-
-      print("SL Chip resource fixed successfully.")
-      print(f"Updated XML files: {changed}")
-      PY
-
-      if grep -R -n -F '@style/SL.Chip' "$APKTOOL_DIR/res"; then
-        echo "ERROR: Old SL.Chip references remain."
+      if [ ! -f "$STYLE_FILE" ]; then
+        echo "ERROR: sl_styles.xml not found."
         exit 1
       fi
+
+      python3 - "$STYLE_FILE" <<'PY'
+      import sys
+      import re
+
+      path = sys.argv[1]
+
+      with open(path, "r", encoding="utf-8") as f:
+          content = f.read()
+
+      pattern = r'<style\s+name="SL\.Chip"(?:\s+parent="[^"]*")?\s*>'
+
+      updated, count = re.subn(
+          pattern,
+          '<style name="SL.Chip" parent="">',
+          content,
+          count=1
+      )
+
+      if count != 1:
+          raise SystemExit(
+              "ERROR: Could not locate SL.Chip style definition."
+          )
+
+      with open(path, "w", encoding="utf-8") as f:
+          f.write(updated)
+
+      print("SL.Chip parent fixed successfully.")
+      PY
+
+      grep -Fq '<style name="SL.Chip" parent="">' "$STYLE_FILE"
 
       echo "Style verification successful."
 
