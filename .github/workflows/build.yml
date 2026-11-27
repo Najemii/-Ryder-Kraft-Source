@@ -1,5 +1,4 @@
-
-name: Extract Clavier APK Source
+name: Build SpeedLife APK
 
 on:
   release:
@@ -8,154 +7,392 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag containing the APK"
+        description: "Release tag that contains the source ZIP (any .zip name works)"
         required: true
-        default: "Clavier"
+        default: "vv3"
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-speedlife-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: true
+
 jobs:
-  extract:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-      - name: Install Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apktool unzip zip jq
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      - name: Get Release Tag
-        id: tag
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      # Skips the slow install when build-tools already exist on the runner.
+      - name: Locate Android build-tools
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$BT" ]; then
+            yes | sdkmanager --licenses >/dev/null 2>&1 || true
+            sdkmanager --install "build-tools;35.0.0"
+            BT="$ANDROID_HOME/build-tools/35.0.0"
+          fi
+          test -x "$BT/zipalign"
+          test -x "$BT/apksigner"
+          echo "BUILD_TOOLS=$BT" >> "$GITHUB_ENV"
+          echo "Using build-tools: $BT"
+
+      - name: Cache Apktool
+        id: apktool_cache
+        uses: actions/cache@v4
+        with:
+          path: apktool.jar
+          key: apktool-2.10.0
+
+      - name: Install Apktool
+        if: steps.apktool_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
+            -o apktool.jar
+          test -s apktool.jar
+
+      # Takes whichever .zip is attached to the release (newest one), no renaming needed.
+      - name: Download source ZIP from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching release: $TAG"
+          RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+
+          ASSET_ID=$(echo "$RELEASE_JSON" | jq -r \
+            '[.assets[] | select(.name | ascii_downcase | endswith(".zip"))]
+             | sort_by(.updated_at) | reverse | .[0].id // empty')
+          ASSET_NAME=$(echo "$RELEASE_JSON" | jq -r \
+            '[.assets[] | select(.name | ascii_downcase | endswith(".zip"))]
+             | sort_by(.updated_at) | reverse | .[0].name // empty')
+
+          if [ -z "$ASSET_ID" ]; then
+            echo "No .zip found in release $TAG"
+            echo "Available assets:"
+            echo "$RELEASE_JSON" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          echo "Using source ZIP: $ASSET_NAME"
+
+          curl -fL --retry 3 \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
+            -o source.zip
+
+          test -s source.zip
+          mkdir -p source
+          unzip -q source.zip -d source
+          rm -f source.zip
+          echo "Source ZIP ready."
+
+      # The ZIP now holds TWO apktool projects: SpeedLife (main) and Clavier (Style PC client).
+      - name: Locate and validate projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t FILES < <(find source -type f -name apktool.yml)
+          echo "Found ${#FILES[@]} apktool project(s)."
+
+          APKTOOL_DIR=""
+          CLAVIER_DIR=""
+          for f in "${FILES[@]}"; do
+            d="$(dirname "$f")"
+            if grep -Fq 'package="speedlife.launcher.game"' "$d/AndroidManifest.xml" 2>/dev/null; then
+              APKTOOL_DIR="$d"
+            elif grep -Fq 'package="com.nezukosamp.game"' "$d/AndroidManifest.xml" 2>/dev/null; then
+              CLAVIER_DIR="$d"
+            fi
+          done
+
+          if [ -z "$APKTOOL_DIR" ]; then
+            echo "ERROR: SpeedLife project (package speedlife.launcher.game) not found."
+            exit 1
+          fi
+
+          echo "APKTOOL_DIR=$APKTOOL_DIR" >> "$GITHUB_ENV"
+          echo "CLAVIER_DIR=$CLAVIER_DIR" >> "$GITHUB_ENV"
+          echo "SpeedLife project: $APKTOOL_DIR"
+          echo "Clavier project:   ${CLAVIER_DIR:-<none, Style PC will not be bundled>}"
+
+          test -f "$APKTOOL_DIR/AndroidManifest.xml"
+          test -f "$APKTOOL_DIR/res/values/public.xml"
+
+          LISTENER=$(find "$APKTOOL_DIR" -name DirectConnectSubmitListener.smali -print -quit)
+          test -n "$LISTENER"
+          grep -Fq '82.39.186.143' "$LISTENER"
+
+          if ! grep -Eq '7013|0x1b65' "$LISTENER"; then
+            echo "ERROR: Server port verification failed."
+            exit 1
+          fi
+
+          if [ -n "$CLAVIER_DIR" ]; then
+            test -f "$CLAVIER_DIR/AndroidManifest.xml"
+            grep -Fq '/Android/data/speedlife.launcher.game/files/' \
+              "$CLAVIER_DIR/smali/com/wardrumstudios/utils/WarMedia.smali"
+          fi
+
+          echo "Project validation successful."
+
+      # Only touches SL.Chip if it exists. A project without it is fine (no failure).
+      - name: Fix SL Chip Style (optional)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STYLE_FILE="$APKTOOL_DIR/res/values/sl_styles.xml"
+
+          if [ ! -f "$STYLE_FILE" ]; then
+            echo "No sl_styles.xml; skipping."
+            exit 0
+          fi
+
+          python3 - "$STYLE_FILE" <<'PY'
+          import sys, re
+
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          if 'name="SL.Chip"' not in content:
+              print("SL.Chip not used in this project; nothing to fix.")
+          else:
+              updated, count = re.subn(
+                  r'<style\s+name="SL\.Chip"\s*>',
+                  '<style name="SL.Chip" parent="">',
+                  content,
+                  count=1,
+              )
+              if count:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(updated)
+                  print("SL.Chip parent fixed.")
+              else:
+                  print("SL.Chip already has a parent.")
+          PY
+
+      - name: Fix Settings Layout Attribute
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$APKTOOL_DIR/res/layout/fragment_settings_page.xml"
+
+          if [ -f "$FILE" ]; then
+            python3 - "$FILE" <<'PY'
+          import sys, re
+
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          updated, count = re.subn(
+              r'(\bboxBackgroundMode\s*=\s*["\'])outlined(["\'])',
+              r'\1outline\2',
+              content,
+          )
+
+          if count:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(updated)
+
+          print(f"Adjusted {count} value(s).")
+          PY
           else
-            TAG="${{ inputs.tag }}"
+            echo "Settings layout not found; skipping."
           fi
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Download APK
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p input output
-
-          gh release download "${{ steps.tag.outputs.tag }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "app-game-release.apk" \
-            --dir input
-
-          test -s input/app-game-release.apk
-
-      - name: Install JADX
-        run: |
-          URL=$(curl -fsSL \
-            https://api.github.com/repos/skylot/jadx/releases/latest \
-            | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url' \
-            | head -n 1)
-
-          test -n "$URL"
-
-          curl -fL "$URL" -o jadx.zip
-
-          mkdir jadx
-          unzip -q jadx.zip -d jadx
-
-          JADX=$(find jadx -type f -name jadx | head -n 1)
-
-          test -n "$JADX"
-          chmod +x "$JADX"
-
-          echo "JADX=$GITHUB_WORKSPACE/$JADX" >> "$GITHUB_ENV"
-
-      - name: Extract Java Source
+      - name: Verify resource IDs
         shell: bash
         run: |
-          mkdir -p output/java
+          set -euo pipefail
 
-          set +e
+          python3 - "$APKTOOL_DIR/res/values/public.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
 
-          "$JADX" --show-bad-code \
-            -d output/java \
-            input/app-game-release.apk
+          root = ET.parse(sys.argv[1]).getroot()
+          seen = set()
 
-          JADX_EXIT=$?
+          for item in root.findall("public"):
+              rid = item.get("id")
+              if rid and rid in seen:
+                  raise SystemExit("Duplicate resource ID: " + rid)
+              if rid:
+                  seen.add(rid)
 
-          set -e
+          print("Resource IDs verified.")
+          PY
 
-          if [ "$JADX_EXIT" -ne 0 ]; then
-            echo "WARNING: JADX reported errors: $JADX_EXIT"
-            echo "Continuing with available extracted files..."
+      # One signing key for BOTH apks (SpeedLife + the bundled Clavier).
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SPEEDLIFE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SPEEDLIFE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.SPEEDLIFE_KEY_ALIAS }}
+          KEY_PASSWORD_SECRET: ${{ secrets.SPEEDLIFE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "$KEYSTORE_BASE64" ]; then
+
+            if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS_SECRET" ]; then
+              echo "ERROR: Signing secrets are incomplete."
+              exit 1
+            fi
+
+            echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
+
+            echo "SIGN_ALIAS=$KEY_ALIAS_SECRET" >> "$GITHUB_ENV"
+            echo "SIGN_STORE_PASS=$STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "SIGN_KEY_PASS=${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "Using configured signing key."
+
+          else
+
+            echo "No signing key configured. Creating temporary signing key."
+
+            keytool -genkeypair \
+              -keystore speedlife.keystore \
+              -alias speedlife \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass temporary123 \
+              -keypass temporary123 \
+              -dname "CN=SpeedLife, OU=Launcher, O=SpeedLife, L=Unknown, ST=Unknown, C=US"
+
+            echo "SIGN_ALIAS=speedlife" >> "$GITHUB_ENV"
+            echo "SIGN_STORE_PASS=temporary123" >> "$GITHUB_ENV"
+            echo "SIGN_KEY_PASS=temporary123" >> "$GITHUB_ENV"
+
           fi
 
-          echo "Java extraction step finished."
+          test -s speedlife.keystore
 
-      - name: Extract APK Resources and Smali
+      # Style PC client: built first, signed, then copied into SpeedLife's assets.
+      - name: Build Style PC client (Clavier)
+        if: env.CLAVIER_DIR != ''
+        shell: bash
         run: |
-          apktool d -f \
-            input/app-game-release.apk \
-            -o output/apktool
+          set -euo pipefail
 
-      - name: Include Original APK
+          rm -rf "$CLAVIER_DIR/build" "$CLAVIER_DIR/dist"
+
+          java -Xmx3g -jar apktool.jar b --use-aapt2 --force \
+            "$CLAVIER_DIR" -o Clavier-unsigned.apk 2>&1 | tee build-clavier.log
+
+          test -s Clavier-unsigned.apk
+          "$BUILD_TOOLS/zipalign" -f 4 Clavier-unsigned.apk Clavier-aligned.apk
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks speedlife.keystore \
+            --ks-key-alias "$SIGN_ALIAS" \
+            --ks-pass "pass:$SIGN_STORE_PASS" \
+            --key-pass "pass:$SIGN_KEY_PASS" \
+            --out Clavier.apk \
+            Clavier-aligned.apk
+
+          "$BUILD_TOOLS/apksigner" verify Clavier.apk
+
+          mkdir -p "$APKTOOL_DIR/assets"
+          cp Clavier.apk "$APKTOOL_DIR/assets/clavier.apk"
+          echo "Clavier bundled into SpeedLife assets."
+
+      - name: Build APK
+        shell: bash
         run: |
-          cp input/app-game-release.apk output/
+          set -euo pipefail
 
-      - name: Create Extraction Report
+          rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
+
+          java -Xmx3g -jar apktool.jar b --use-aapt2 --force \
+            "$APKTOOL_DIR" -o SpeedLife-unsigned.apk 2>&1 | tee build.log
+
+          test -s SpeedLife-unsigned.apk
+          echo "APK build completed."
+
+      - name: Align APK
+        shell: bash
         run: |
-          cat > output/README.txt <<'EOF'
-          CLAVIER APK SOURCE EXTRACTION
+          set -euo pipefail
+          "$BUILD_TOOLS/zipalign" -f 4 SpeedLife-unsigned.apk SpeedLife-aligned.apk
+          test -s SpeedLife-aligned.apk
 
-          Contents:
-
-          java/
-          Decompiled Java source code.
-
-          apktool/
-          Smali code, XML, Manifest, resources,
-          assets and available native libraries.
-
-          app-game-release.apk
-          Original APK file.
-
-          IMPORTANT:
-          This is a decompiled extraction.
-          It is not the original Android Studio project.
-          Some Java files may contain decompilation errors.
-          Native .so libraries remain compiled binaries.
-          EOF
-
-      - name: Create Source ZIP
+      - name: Sign APK
+        shell: bash
         run: |
-          cd output
+          set -euo pipefail
 
-          zip -qr ../Clavier-decompiled-source.zip .
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks speedlife.keystore \
+            --ks-key-alias "$SIGN_ALIAS" \
+            --ks-pass "pass:$SIGN_STORE_PASS" \
+            --key-pass "pass:$SIGN_KEY_PASS" \
+            --out SpeedLife.apk \
+            SpeedLife-aligned.apk
 
-          cd ..
+          test -s SpeedLife.apk
+          echo "APK signing completed."
 
-          ls -lh Clavier-decompiled-source.zip
-
-      - name: Upload ZIP to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify signed APK
+        shell: bash
         run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" \
-            Clavier-decompiled-source.zip \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          set -euo pipefail
+          "$BUILD_TOOLS/apksigner" verify SpeedLife.apk
+          "$BUILD_TOOLS/zipalign" -c 4 SpeedLife.apk
+          echo "APK verification successful."
 
-      - name: Upload ZIP as Workflow Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Clavier-decompiled-source
-          path: Clavier-decompiled-source.zip
+          name: SpeedLife-APK
+          path: SpeedLife.apk
+          if-no-files-found: error
           retention-days: 30
 
-      - name: Complete
+      - name: Upload APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
         run: |
-          echo "================================"
-          echo "CLAVIER EXTRACTION COMPLETED"
-          echo "================================"
-          ls -lh Clavier-decompiled-source.zip
+          set -euo pipefail
+          gh release upload "$TAG" SpeedLife.apk \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "SpeedLife APK uploaded to release $TAG."
+
+      # If anything fails, the build logs are saved so the exact error can be read quickly.
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build.log
+            build-clavier.log
+          if-no-files-found: ignore
+          retention-days: 7
