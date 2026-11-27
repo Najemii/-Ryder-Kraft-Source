@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install tools
+      - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y apktool unzip zip jq
@@ -37,15 +37,18 @@ jobs:
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Download APK from Release
+      - name: Download APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p input output
+
           gh release download "${{ steps.tag.outputs.tag }}" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "app-game-release.apk" \
             --dir input
+
+          test -s input/app-game-release.apk
 
       - name: Install JADX
         run: |
@@ -55,42 +58,84 @@ jobs:
             | head -n 1)
 
           test -n "$URL"
+
           curl -fL "$URL" -o jadx.zip
+
           mkdir jadx
           unzip -q jadx.zip -d jadx
+
           JADX=$(find jadx -type f -name jadx | head -n 1)
+
+          test -n "$JADX"
           chmod +x "$JADX"
+
           echo "JADX=$GITHUB_WORKSPACE/$JADX" >> "$GITHUB_ENV"
 
       - name: Extract Java Source
+        shell: bash
         run: |
           mkdir -p output/java
-          "$JADX" -d output/java input/app-game-release.apk
+
+          set +e
+
+          "$JADX" --show-bad-code \
+            -d output/java \
+            input/app-game-release.apk
+
+          JADX_EXIT=$?
+
+          set -e
+
+          if [ "$JADX_EXIT" -ne 0 ]; then
+            echo "WARNING: JADX reported errors: $JADX_EXIT"
+            echo "Continuing with available extracted files..."
+          fi
+
+          echo "Java extraction step finished."
 
       - name: Extract APK Resources and Smali
         run: |
-          apktool d -f input/app-game-release.apk \
+          apktool d -f \
+            input/app-game-release.apk \
             -o output/apktool
 
       - name: Include Original APK
         run: |
           cp input/app-game-release.apk output/
 
-      - name: Create Source ZIP
+      - name: Create Extraction Report
         run: |
           cat > output/README.txt <<'EOF'
-          Clavier APK Extraction
+          CLAVIER APK SOURCE EXTRACTION
 
-          java/       Decompiled Java source
-          apktool/    Smali, XML, resources, assets and libraries
-          APK         Original application
+          Contents:
 
-          Note: Decompiled code is not guaranteed to match
-          the original Android Studio project.
+          java/
+          Decompiled Java source code.
+
+          apktool/
+          Smali code, XML, Manifest, resources,
+          assets and available native libraries.
+
+          app-game-release.apk
+          Original APK file.
+
+          IMPORTANT:
+          This is a decompiled extraction.
+          It is not the original Android Studio project.
+          Some Java files may contain decompilation errors.
+          Native .so libraries remain compiled binaries.
           EOF
 
+      - name: Create Source ZIP
+        run: |
           cd output
+
           zip -qr ../Clavier-decompiled-source.zip .
+
+          cd ..
+
+          ls -lh Clavier-decompiled-source.zip
 
       - name: Upload ZIP to GitHub Release
         env:
@@ -107,3 +152,10 @@ jobs:
           name: Clavier-decompiled-source
           path: Clavier-decompiled-source.zip
           retention-days: 30
+
+      - name: Complete
+        run: |
+          echo "================================"
+          echo "CLAVIER EXTRACTION COMPLETED"
+          echo "================================"
+          ls -lh Clavier-decompiled-source.zip
