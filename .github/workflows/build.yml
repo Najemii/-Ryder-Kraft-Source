@@ -84,7 +84,7 @@ jobs:
           set -euo pipefail
 
           echo "Release: $TAG"
-          echo "Asset: $SOURCE_ASSET"
+          echo "Source: $SOURCE_ASSET"
 
           RELEASE_JSON=$(gh api \
             "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
@@ -139,9 +139,13 @@ jobs:
           grep -Fq 'speedlife.launcher.game' \
             "$PROJECT_DIR/AndroidManifest.xml"
 
-          echo "Project: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
 
-      - name: Validate XML Resources
+      # IMPORTANT:
+      # apktool/original contains binary Android XML.
+      # Do not parse these files using Python ElementTree.
+
+      - name: Validate Decoded XML Resources
         shell: bash
         run: |
           set -euo pipefail
@@ -153,23 +157,42 @@ jobs:
 
           root = sys.argv[1]
           errors = []
+          checked = 0
 
           for base, dirs, files in os.walk(root):
+
+              # Skip original binary Android resources.
+              dirs[:] = [
+                  d for d in dirs
+                  if d.lower() != "original"
+                  and d.lower() != "build"
+                  and d.lower() != "dist"
+              ]
+
               for name in files:
-                  if name.endswith(".xml"):
-                      path = os.path.join(base, name)
-                      try:
-                          ET.parse(path)
-                      except Exception as e:
-                          errors.append((path, str(e)))
+                  if not name.lower().endswith(".xml"):
+                      continue
+
+                  path = os.path.join(base, name)
+
+                  try:
+                      ET.parse(path)
+                      checked += 1
+                  except Exception as e:
+                      errors.append((path, str(e)))
 
           if errors:
+              print("XML validation errors:")
+
               for path, error in errors:
-                  print("INVALID XML:", path)
-                  print(error)
+                  print("\nFILE:", path)
+                  print("ERROR:", error)
+
               sys.exit(1)
 
-          print("XML validation successful.")
+          print("Decoded XML validation successful.")
+          print("Files checked:", checked)
+          print("Original binary resources skipped.")
           PY
 
       - name: Fix Settings Layout
@@ -202,7 +225,7 @@ jobs:
           print("Adjusted:", count)
           PY
           else
-            echo "Settings layout not found."
+            echo "Settings layout not found. Skipping."
           fi
 
       - name: Verify Resource IDs
@@ -221,7 +244,9 @@ jobs:
               rid = item.get("id")
 
               if rid and rid in seen:
-                  raise SystemExit("Duplicate resource ID: " + rid)
+                  raise SystemExit(
+                      "Duplicate resource ID: " + rid
+                  )
 
               if rid:
                   seen.add(rid)
@@ -254,7 +279,6 @@ jobs:
               echo "AAPT2 build successful."
               exit 0
             fi
-
           fi
 
           echo "AAPT2 failed. Trying AAPT1..."
@@ -277,7 +301,6 @@ jobs:
               echo "AAPT1 build successful."
               exit 0
             fi
-
           fi
 
           echo "ERROR: Both build methods failed."
@@ -296,6 +319,8 @@ jobs:
             SpeedLife-aligned.apk
 
           test -s SpeedLife-aligned.apk
+
+          echo "APK aligned successfully."
 
       - name: Sign APK
         env:
@@ -318,6 +343,8 @@ jobs:
             ALIAS="$KEY_ALIAS_SECRET"
             STORE_PASS="$STORE_PASSWORD"
             KEY_PASS="${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}"
+
+            echo "Using configured signing key."
 
           else
 
@@ -348,6 +375,8 @@ jobs:
             SpeedLife-aligned.apk
 
           test -s SpeedLife.apk
+
+          echo "APK signed successfully."
 
       - name: Verify APK
         shell: bash
@@ -381,14 +410,13 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-          echo "APK uploaded successfully."
+          echo "APK uploaded to release $TAG."
 
       - name: Upload Build Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: SpeedLife-Build-Logs
-          path: |
-            build.log
+          path: build.log
           if-no-files-found: ignore
           retention-days: 7
