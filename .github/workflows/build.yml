@@ -1,23 +1,23 @@
+
 name: Build SpeedLife APK
 
 on:
   release:
     types: [published]
+
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag"
+        description: "Release tag that contains the source ZIP"
         required: true
         default: "vv3"
-        type: string
-      source_asset:
-        description: "Source ZIP filename"
-        required: true
-        default: "SpeedLife_PC_Input_Repaired_Source.zip"
-        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: build-speedlife-${{ github.event.release.tag_name || inputs.tag || 'vv3' }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -26,90 +26,167 @@ jobs:
 
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag || 'vv3' }}
-      SOURCE_ASSET: ${{ inputs.source_asset || 'SpeedLife_PC_Input_Repaired_Source.zip' }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Java 17
+      - name: Install Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # Do not use android-actions/setup-android here.
+      # It attempts to install the unavailable legacy package "tools".
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+
+          if [ ! -d "$SDK" ]; then
+            echo "::error::Android SDK directory not found: $SDK"
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+          mapfile -t MANAGERS < <(
+            find "$SDK/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V
+          )
+
+          if [ "${#MANAGERS[@]}" -eq 0 ]; then
+            echo "::error::sdkmanager not found in Android SDK."
+            exit 1
+          fi
+
+          SDKMANAGER="${MANAGERS[-1]}"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "Android SDK: $SDK"
+          echo "SDK Manager: $SDKMANAGER"
 
       - name: Install Android build tools
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install \
+
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Download Apktool
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+
+          test -x "$BT/zipalign"
+          test -x "$BT/apksigner"
+
+          echo "BUILD_TOOLS=$BT" >> "$GITHUB_ENV"
+
+          echo "Android build tools installed."
+
+      - name: Cache Apktool
+        id: apktool_cache
+        uses: actions/cache@v4
+        with:
+          path: apktool.jar
+          key: apktool-2.10.0
+
+      - name: Install Apktool
+        if: steps.apktool_cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 4 \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar" \
+
+          curl -fL --retry 3 --retry-delay 2 \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -o apktool.jar
+
           test -s apktool.jar
 
-      - name: Download source ZIP from Release
+      - name: Download source ZIP from release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
 
-          RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          echo "Searching release: $TAG"
 
-          ASSET_ID="$(printf '%s' "$RELEASE_JSON" | jq -r \
-            --arg asset "$SOURCE_ASSET" \
-            '[.assets[] | select(.name == $asset)][0].id // empty')"
+          RELEASE_JSON="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+
+          ASSET_ID="$(echo "$RELEASE_JSON" | jq -r \
+            '[.assets[] | select(.name | ascii_downcase | endswith(".zip"))]
+             | sort_by(.updated_at) | reverse | .[0].id // empty')"
+
+          ASSET_NAME="$(echo "$RELEASE_JSON" | jq -r \
+            '[.assets[] | select(.name | ascii_downcase | endswith(".zip"))]
+             | sort_by(.updated_at) | reverse | .[0].name // empty')"
 
           if [ -z "$ASSET_ID" ]; then
-            echo "::error::Source ZIP not found in release $TAG"
-            printf '%s\n' "$RELEASE_JSON" | jq -r '.assets[].name'
+            echo "::error::No ZIP found in release $TAG"
+            echo "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
 
-          curl -fL \
+          echo "Using source ZIP: $ASSET_NAME"
+
+          curl -fL --retry 3 \
             -H "Accept: application/octet-stream" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
             -o source.zip
 
+          test -s source.zip
           unzip -tq source.zip
+
           mkdir -p source
           unzip -q source.zip -d source
 
-      - name: Locate Apktool project
+          echo "Source ZIP ready."
+
+      - name: Locate and validate project
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t PROJECT_FILES < <(
+          mapfile -t FILES < <(
             find source -type f -name apktool.yml -not -path '*/original/*'
           )
 
-          if [ "${#PROJECT_FILES[@]}" -ne 1 ]; then
-            echo "::error::Expected one apktool.yml, found ${#PROJECT_FILES[@]}"
-            printf '%s\n' "${PROJECT_FILES[@]}"
+          if [ "${#FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one apktool.yml; found ${#FILES[@]}"
+            printf '%s\n' "${FILES[@]}"
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "${PROJECT_FILES[0]}")"
+          APKTOOL_DIR="$(dirname "${FILES[0]}")"
 
-          test -f "$PROJECT_DIR/AndroidManifest.xml"
+          echo "APKTOOL_DIR=$APKTOOL_DIR" >> "$GITHUB_ENV"
 
-          echo "APKTOOL_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          test -f "$APKTOOL_DIR/AndroidManifest.xml"
+          test -f "$APKTOOL_DIR/res/values/public.xml"
+
+          grep -Fq 'speedlife.launcher.game' "$APKTOOL_DIR/AndroidManifest.xml"
+
+          LISTENER="$(find "$APKTOOL_DIR" -name DirectConnectSubmitListener.smali -print -quit)"
+
+          if [ -z "$LISTENER" ]; then
+            echo "::error::DirectConnectSubmitListener.smali not found."
+            exit 1
+          fi
+
+          grep -Fq '82.39.186.143' "$LISTENER"
+
+          if ! grep -Eq '7013|0x1b65' "$LISTENER"; then
+            echo "::error::Server port verification failed."
+            exit 1
+          fi
+
+          echo "Project validation successful."
 
       - name: Repair known Smali compile error
         shell: bash
@@ -117,10 +194,16 @@ jobs:
           set -euo pipefail
 
           FILE="$APKTOOL_DIR/smali/com/wardrumstudios/utils/SlPadCapture.smali"
-          test -f "$FILE"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::SlPadCapture.smali not found."
+            exit 1
+          fi
 
           python3 - "$FILE" <<'PY'
-          import pathlib, re, sys
+          import pathlib
+          import re
+          import sys
 
           path = pathlib.Path(sys.argv[1])
           text = path.read_text(encoding="utf-8")
@@ -149,13 +232,86 @@ jobs:
               raise SystemExit("Unexpected Smali structure.")
           PY
 
+      - name: Fix SL Chip Style (optional)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STYLE_FILE="$APKTOOL_DIR/res/values/sl_styles.xml"
+
+          if [ ! -f "$STYLE_FILE" ]; then
+            echo "No sl_styles.xml; skipping."
+            exit 0
+          fi
+
+          python3 - "$STYLE_FILE" <<'PY'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          if 'name="SL.Chip"' not in content:
+              print("SL.Chip not found; skipping.")
+          else:
+              updated, count = re.subn(
+                  r'<style\s+name="SL\.Chip"\s*>',
+                  '<style name="SL.Chip" parent="">',
+                  content,
+                  count=1,
+              )
+
+              if count:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(updated)
+                  print("SL.Chip parent fixed.")
+              else:
+                  print("SL.Chip already has a parent.")
+          PY
+
+      - name: Fix Settings Layout Attribute
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$APKTOOL_DIR/res/layout/fragment_settings_page.xml"
+
+          if [ -f "$FILE" ]; then
+            python3 - "$FILE" <<'PY'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          updated, count = re.subn(
+              r'(\bboxBackgroundMode\s*=\s*["\'])outlined(["\'])',
+              r'\1outline\2',
+              content,
+          )
+
+          if count:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(updated)
+
+          print(f"Adjusted {count} value(s).")
+          PY
+          else
+            echo "Settings layout not found; skipping."
+          fi
+
       - name: Validate decoded XML resources
         shell: bash
         run: |
           set -euo pipefail
 
           python3 - "$APKTOOL_DIR" <<'PY'
-          import os, sys
+          import os
+          import sys
           import xml.etree.ElementTree as ET
 
           root = sys.argv[1]
@@ -185,16 +341,18 @@ jobs:
           print(f"Validated {checked} XML files.")
           PY
 
-      - name: Verify public resource IDs
+      - name: Verify resource IDs
         shell: bash
         run: |
           set -euo pipefail
 
           python3 - "$APKTOOL_DIR/res/values/public.xml" <<'PY'
-          import collections, sys
+          import sys
+          import collections
           import xml.etree.ElementTree as ET
 
           root = ET.parse(sys.argv[1]).getroot()
+
           ids = [
               item.get("id")
               for item in root.findall("public")
@@ -202,15 +360,14 @@ jobs:
           ]
 
           duplicates = [
-              value
-              for value, count in collections.Counter(ids).items()
+              rid for rid, count in collections.Counter(ids).items()
               if count > 1
           ]
 
           if duplicates:
-              raise SystemExit("Duplicate IDs: " + ", ".join(duplicates))
+              raise SystemExit("Duplicate resource IDs: " + ", ".join(duplicates))
 
-          print("Public resource IDs verified.")
+          print("Resource IDs verified.")
           PY
 
       - name: Build APK with AAPT2
@@ -220,11 +377,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          java -jar apktool.jar b \
-            --use-aapt2 \
-            --force \
-            "$APKTOOL_DIR" \
-            -o SpeedLife-unsigned.apk
+          rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
+
+          java -jar apktool.jar b --use-aapt2 --force \
+            "$APKTOOL_DIR" -o SpeedLife-unsigned.apk 2>&1 | tee build.log
+
+          test -s SpeedLife-unsigned.apk
 
       - name: Build APK with AAPT1 fallback
         if: steps.build_aapt2.outcome == 'failure'
@@ -235,17 +393,15 @@ jobs:
           rm -f SpeedLife-unsigned.apk
           rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
 
-          java -jar apktool.jar b \
-            --force \
-            "$APKTOOL_DIR" \
-            -o SpeedLife-unsigned.apk
+          java -jar apktool.jar b --force \
+            "$APKTOOL_DIR" -o SpeedLife-unsigned.apk 2>&1 | tee -a build.log
+
+          test -s SpeedLife-unsigned.apk
 
       - name: Align APK
         shell: bash
         run: |
           set -euo pipefail
-
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
 
           "$BUILD_TOOLS/zipalign" -f -p 4 \
             SpeedLife-unsigned.apk SpeedLife-aligned.apk
@@ -254,23 +410,32 @@ jobs:
 
       - name: Sign APK
         env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.SPEEDLIFE_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.SPEEDLIFE_KEYSTORE_PASSWORD }}
-          KEY_ALIAS_SECRET: ${{ secrets.ANDROID_KEY_ALIAS || secrets.SPEEDLIFE_KEY_ALIAS }}
-          KEY_PASSWORD_SECRET: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.SPEEDLIFE_KEY_PASSWORD }}
+          KEYSTORE_BASE64: ${{ secrets.SPEEDLIFE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SPEEDLIFE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.SPEEDLIFE_KEY_ALIAS }}
+          KEY_PASSWORD_SECRET: ${{ secrets.SPEEDLIFE_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
+
+            if [ -z "${STORE_PASSWORD:-}" ] || [ -z "${KEY_ALIAS_SECRET:-}" ]; then
+              echo "::error::Signing secrets are incomplete."
+              exit 1
+            fi
+
             echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
 
-            KEY_PASS="${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}"
             ALIAS="$KEY_ALIAS_SECRET"
+            STORE_PASS="$STORE_PASSWORD"
+            KEY_PASS="${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}"
+
+            echo "Using configured signing key."
+
           else
-            echo "::warning::Using temporary signing key."
+
+            echo "::warning::Using temporary signing key. This APK may not update an app signed with another key."
 
             keytool -genkeypair -noprompt \
               -keystore speedlife.keystore \
@@ -280,32 +445,35 @@ jobs:
               -validity 10000 \
               -storepass temporary123 \
               -keypass temporary123 \
-              -dname "CN=SpeedLife, O=SpeedLife, C=US"
+              -dname "CN=SpeedLife, OU=Launcher, O=SpeedLife, L=Unknown, ST=Unknown, C=US"
 
-            STORE_PASSWORD="temporary123"
-            KEY_PASS="temporary123"
             ALIAS="speedlife"
+            STORE_PASS="temporary123"
+            KEY_PASS="temporary123"
+
           fi
 
           "$BUILD_TOOLS/apksigner" sign \
             --ks speedlife.keystore \
             --ks-key-alias "$ALIAS" \
-            --ks-pass "pass:$STORE_PASSWORD" \
+            --ks-pass "pass:$STORE_PASS" \
             --key-pass "pass:$KEY_PASS" \
             --out SpeedLife.apk \
             SpeedLife-aligned.apk
 
-      - name: Verify APK
+          test -s SpeedLife.apk
+
+      - name: Verify signed APK
         shell: bash
         run: |
           set -euo pipefail
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
           "$BUILD_TOOLS/apksigner" verify --verbose SpeedLife.apk
           "$BUILD_TOOLS/zipalign" -c 4 SpeedLife.apk
 
-      - name: Upload APK artifact
+          echo "APK verification successful."
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SpeedLife-APK
@@ -323,3 +491,14 @@ jobs:
           gh release upload "$TAG" SpeedLife.apk \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+          echo "SpeedLife APK uploaded to release $TAG."
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeedLife-build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
