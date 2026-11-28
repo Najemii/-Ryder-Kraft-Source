@@ -21,7 +21,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Install Java
@@ -103,41 +103,27 @@ jobs:
           test -s source.zip
           mkdir -p source
           unzip -q source.zip -d source
-          rm -f source.zip
           echo "Source ZIP ready."
 
-      # The ZIP now holds TWO apktool projects: SpeedLife (main) and Clavier (Style PC client).
-      - name: Locate and validate projects
+      - name: Locate and validate project
         shell: bash
         run: |
           set -euo pipefail
 
           mapfile -t FILES < <(find source -type f -name apktool.yml)
-          echo "Found ${#FILES[@]} apktool project(s)."
 
-          APKTOOL_DIR=""
-          CLAVIER_DIR=""
-          for f in "${FILES[@]}"; do
-            d="$(dirname "$f")"
-            if grep -Fq 'package="speedlife.launcher.game"' "$d/AndroidManifest.xml" 2>/dev/null; then
-              APKTOOL_DIR="$d"
-            elif grep -Fq 'package="com.nezukosamp.game"' "$d/AndroidManifest.xml" 2>/dev/null; then
-              CLAVIER_DIR="$d"
-            fi
-          done
-
-          if [ -z "$APKTOOL_DIR" ]; then
-            echo "ERROR: SpeedLife project (package speedlife.launcher.game) not found."
+          if [ "${#FILES[@]}" -ne 1 ]; then
+            echo "Expected exactly one apktool.yml; found ${#FILES[@]}"
             exit 1
           fi
 
+          APKTOOL_DIR="$(dirname "${FILES[0]}")"
           echo "APKTOOL_DIR=$APKTOOL_DIR" >> "$GITHUB_ENV"
-          echo "CLAVIER_DIR=$CLAVIER_DIR" >> "$GITHUB_ENV"
-          echo "SpeedLife project: $APKTOOL_DIR"
-          echo "Clavier project:   ${CLAVIER_DIR:-<none, Style PC will not be bundled>}"
 
           test -f "$APKTOOL_DIR/AndroidManifest.xml"
           test -f "$APKTOOL_DIR/res/values/public.xml"
+
+          grep -Fq 'speedlife.launcher.game' "$APKTOOL_DIR/AndroidManifest.xml"
 
           LISTENER=$(find "$APKTOOL_DIR" -name DirectConnectSubmitListener.smali -print -quit)
           test -n "$LISTENER"
@@ -146,12 +132,6 @@ jobs:
           if ! grep -Eq '7013|0x1b65' "$LISTENER"; then
             echo "ERROR: Server port verification failed."
             exit 1
-          fi
-
-          if [ -n "$CLAVIER_DIR" ]; then
-            test -f "$CLAVIER_DIR/AndroidManifest.xml"
-            grep -Fq '/Android/data/speedlife.launcher.game/files/' \
-              "$CLAVIER_DIR/smali/com/wardrumstudios/utils/WarMedia.smali"
           fi
 
           echo "Project validation successful."
@@ -246,8 +226,27 @@ jobs:
           print("Resource IDs verified.")
           PY
 
-      # One signing key for BOTH apks (SpeedLife + the bundled Clavier).
-      - name: Prepare signing key
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
+
+          java -jar apktool.jar b --use-aapt2 --force \
+            "$APKTOOL_DIR" -o SpeedLife-unsigned.apk 2>&1 | tee build.log
+
+          test -s SpeedLife-unsigned.apk
+          echo "APK build completed."
+
+      - name: Align APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUILD_TOOLS/zipalign" -f 4 SpeedLife-unsigned.apk SpeedLife-aligned.apk
+          test -s SpeedLife-aligned.apk
+
+      - name: Sign APK
         env:
           KEYSTORE_BASE64: ${{ secrets.SPEEDLIFE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.SPEEDLIFE_KEYSTORE_PASSWORD }}
@@ -266,9 +265,9 @@ jobs:
 
             echo "$KEYSTORE_BASE64" | base64 --decode > speedlife.keystore
 
-            echo "SIGN_ALIAS=$KEY_ALIAS_SECRET" >> "$GITHUB_ENV"
-            echo "SIGN_STORE_PASS=$STORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_PASS=${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}" >> "$GITHUB_ENV"
+            ALIAS="$KEY_ALIAS_SECRET"
+            STORE_PASS="$STORE_PASSWORD"
+            KEY_PASS="${KEY_PASSWORD_SECRET:-$STORE_PASSWORD}"
             echo "Using configured signing key."
 
           else
@@ -285,73 +284,17 @@ jobs:
               -keypass temporary123 \
               -dname "CN=SpeedLife, OU=Launcher, O=SpeedLife, L=Unknown, ST=Unknown, C=US"
 
-            echo "SIGN_ALIAS=speedlife" >> "$GITHUB_ENV"
-            echo "SIGN_STORE_PASS=temporary123" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_PASS=temporary123" >> "$GITHUB_ENV"
+            ALIAS="speedlife"
+            STORE_PASS="temporary123"
+            KEY_PASS="temporary123"
 
           fi
 
-          test -s speedlife.keystore
-
-      # Style PC client: built first, signed, then copied into SpeedLife's assets.
-      - name: Build Style PC client (Clavier)
-        if: env.CLAVIER_DIR != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf "$CLAVIER_DIR/build" "$CLAVIER_DIR/dist"
-
-          java -Xmx3g -jar apktool.jar b --use-aapt2 --force \
-            "$CLAVIER_DIR" -o Clavier-unsigned.apk 2>&1 | tee build-clavier.log
-
-          test -s Clavier-unsigned.apk
-          "$BUILD_TOOLS/zipalign" -f 4 Clavier-unsigned.apk Clavier-aligned.apk
-
           "$BUILD_TOOLS/apksigner" sign \
             --ks speedlife.keystore \
-            --ks-key-alias "$SIGN_ALIAS" \
-            --ks-pass "pass:$SIGN_STORE_PASS" \
-            --key-pass "pass:$SIGN_KEY_PASS" \
-            --out Clavier.apk \
-            Clavier-aligned.apk
-
-          "$BUILD_TOOLS/apksigner" verify Clavier.apk
-
-          mkdir -p "$APKTOOL_DIR/assets"
-          cp Clavier.apk "$APKTOOL_DIR/assets/clavier.apk"
-          echo "Clavier bundled into SpeedLife assets."
-
-      - name: Build APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf "$APKTOOL_DIR/build" "$APKTOOL_DIR/dist"
-
-          java -Xmx3g -jar apktool.jar b --use-aapt2 --force \
-            "$APKTOOL_DIR" -o SpeedLife-unsigned.apk 2>&1 | tee build.log
-
-          test -s SpeedLife-unsigned.apk
-          echo "APK build completed."
-
-      - name: Align APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$BUILD_TOOLS/zipalign" -f 4 SpeedLife-unsigned.apk SpeedLife-aligned.apk
-          test -s SpeedLife-aligned.apk
-
-      - name: Sign APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$BUILD_TOOLS/apksigner" sign \
-            --ks speedlife.keystore \
-            --ks-key-alias "$SIGN_ALIAS" \
-            --ks-pass "pass:$SIGN_STORE_PASS" \
-            --key-pass "pass:$SIGN_KEY_PASS" \
+            --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$STORE_PASS" \
+            --key-pass "pass:$KEY_PASS" \
             --out SpeedLife.apk \
             SpeedLife-aligned.apk
 
@@ -385,14 +328,12 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --clobber
           echo "SpeedLife APK uploaded to release $TAG."
 
-      # If anything fails, the build logs are saved so the exact error can be read quickly.
-      - name: Upload build logs on failure
+      # If anything fails, the build log is saved so the exact error can be read quickly.
+      - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: |
-            build.log
-            build-clavier.log
+          path: build.log
           if-no-files-found: ignore
           retention-days: 7
